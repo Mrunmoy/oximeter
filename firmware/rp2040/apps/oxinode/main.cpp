@@ -116,7 +116,10 @@ namespace
         Max30102::Config cfg{};
         cfg.devAddr                  = kMax3010xI2cAddr;
         cfg.mode                     = Mode::Spo2;
-        cfg.avg                      = SampleAveraging::AVG_4;
+        // AVG_1 keeps the chip's output rate at 100 Hz, matching
+        // HrDetector's α=0.999/0.001 envelope time-constants. AVG_4
+        // would give 25 Hz post-averaging and the detector mistracks.
+        cfg.avg                      = SampleAveraging::AVG_1;
         cfg.rate                     = SampleRate::SR_100;
         cfg.pulseWidth               = PulseWidth::PW_411_18BIT;
         cfg.adcRange                 = AdcRange::RANGE_4096;
