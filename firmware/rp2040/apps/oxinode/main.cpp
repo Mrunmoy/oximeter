@@ -62,6 +62,15 @@ namespace
     std::atomic<std::int16_t> g_lastSpo2{-1};
     std::atomic<bool>         g_core1Ready{false};
 
+    // Diagnostics surfaced in every alive frame. 127 = "not yet attempted".
+    std::atomic<std::int8_t>  g_probeRc{127};
+    std::atomic<std::int8_t>  g_configureRc{127};
+    std::atomic<std::int32_t> g_lastDrainRc{0};
+    // INTR_STATUS_{1,2} captured by core1 after each drain so core0
+    // can include them in alive frames without touching the I²C bus.
+    std::atomic<std::uint8_t> g_int1{0xFF};
+    std::atomic<std::uint8_t> g_int2{0xFF};
+
     // The link is owned by core0 but written to from core1. The
     // pico_stdio_usb / TinyUSB FIFO is its own synchronisation
     // domain, so a non-atomic pointer is sufficient here — the
@@ -133,50 +142,63 @@ namespace
     // ── core1: sample-drain loop ───────────────────────────────
     void core1_entry()
     {
-        // HAL must be initialised on the same core that uses it,
-        // because pico-sdk's i2c IRQ binding is per-core.
-        PicoI2cHal hal(PicoI2cHal::Config{
+        static PicoI2cHal s_hal(PicoI2cHal::Config{
             /*i2cIndex*/ 0,
             /*sdaPin  */ kPinSda,
             /*sclPin  */ kPinScl,
             /*freqHz  */ kI2cFreqHz,
             /*devAddr */ kMax3010xI2cAddr,
         });
-        hal.init();
+        s_hal.init();
 
-        Max30102 sensor(hal);
-        sensor.addObserver(&g_observer);
+        static Max30102 s_sensor(s_hal);
+        s_sensor.addObserver(&g_observer);
 
-        if (const int rc = sensor.probe(); rc != 0)
+        const int probeRc = s_sensor.probe();
+        g_probeRc.store(static_cast<std::int8_t>(probeRc), std::memory_order_relaxed);
+        if (probeRc != 0)
         {
-            StatusLog::warn("sensor_probe_failed", "rc=%d", rc);
-            // Fall through: AFULL won't ever fire if probe failed,
-            // but keep the FIFO loop alive so a later cable insert
-            // can still bring the device up after a power cycle.
+            StatusLog::warn("sensor_probe_failed", "rc=%d", probeRc);
         }
 
         const Max30102::Config cfg = makeSensorConfig();
-        if (const int rc = sensor.configure(cfg); rc != 0)
+        const int cfgRc = s_sensor.configure(cfg);
+        g_configureRc.store(static_cast<std::int8_t>(cfgRc), std::memory_order_relaxed);
+        if (cfgRc != 0)
         {
-            StatusLog::warn("sensor_configure_failed", "rc=%d", rc);
+            StatusLog::warn("sensor_configure_failed", "rc=%d", cfgRc);
         }
 
         PicoIntPin::init(kPinInt);
         g_core1Ready.store(true, std::memory_order_release);
 
+        // Drain the FIFO every 50 ms regardless of GPIO IRQ — keeps
+        // the data path alive even if INT-pin wiring is wrong, and
+        // any IRQ wakeups still short-circuit the wait via the SIO
+        // FIFO. handleInterrupt() returns 0 cheaply when nothing is
+        // pending so the polled drain has minimal overhead when the
+        // IRQ path is healthy.
         for (;;)
         {
-            const std::uint32_t edges = PicoIntPin::waitForInterrupt();
-            (void)edges;
+            // Best-effort wait for an edge; bounded by the poll
+            // deadline so we always make progress.
+            (void)PicoIntPin::waitForInterruptOrTimeout(50);
 
-            // The driver reads INTR_STATUS_{1,2}, drains the FIFO,
-            // updates HR/SpO2, and fans samples to all observers
-            // we registered above.
-            const int n = sensor.handleInterrupt();
+            const int n = s_sensor.handleInterrupt();
+            g_lastDrainRc.store(n, std::memory_order_relaxed);
             if (n < 0)
             {
                 StatusLog::warn("sensor_isr_drain_failed", "rc=%d", n);
             }
+
+            // Snapshot INTR_STATUS_{1,2} for the alive frame on core0.
+            // Cheap (one I²C transaction, ~100 µs at 100 kHz) and
+            // happens on the same core that owns the I²C bus, so no
+            // cross-core contention.
+            std::uint8_t status[2] = {0xFF, 0xFF};
+            (void)s_hal.i2cReadReg(kMax3010xI2cAddr, 0x00, status, 2);
+            g_int1.store(status[0], std::memory_order_relaxed);
+            g_int2.store(status[1], std::memory_order_relaxed);
         }
     }
 }
@@ -222,7 +244,14 @@ int main()
             const std::uint32_t edges  = PicoIntPin::edgeCount();
             const std::int16_t  hrVal  = g_lastHr.load(std::memory_order_relaxed);
             const std::int16_t  spo2V  = g_lastSpo2.load(std::memory_order_relaxed);
-            link.writeAlive(now, edges, hrVal, spo2V);
+            const std::int8_t   pRc    = g_probeRc.load(std::memory_order_relaxed);
+            const std::int8_t   cRc    = g_configureRc.load(std::memory_order_relaxed);
+            const std::int32_t  dRc    = g_lastDrainRc.load(std::memory_order_relaxed);
+
+            const std::uint8_t int1 = g_int1.load(std::memory_order_relaxed);
+            const std::uint8_t int2 = g_int2.load(std::memory_order_relaxed);
+
+            link.writeAlive(now, edges, hrVal, spo2V, pRc, cRc, int1, int2, dRc);
             nextAlive = make_timeout_time_ms(1000);
         }
 

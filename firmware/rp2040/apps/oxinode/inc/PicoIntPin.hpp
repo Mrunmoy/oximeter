@@ -35,6 +35,11 @@ namespace oxinode::rp2040
         // edges arrive while we're handling a previous one).
         [[nodiscard]] static std::uint32_t waitForInterrupt();
 
+        // Same as waitForInterrupt() but with a bounded timeout.
+        // Returns true if an edge token was popped, false on timeout.
+        // Useful for hybrid IRQ + polled drain loops.
+        [[nodiscard]] static bool waitForInterruptOrTimeout(std::uint32_t timeoutMs);
+
         // Edge counter — useful for telemetry and watchdogs. Reads
         // are relaxed; the ISR uses memory_order_relaxed too.
         [[nodiscard]] static std::uint32_t edgeCount();

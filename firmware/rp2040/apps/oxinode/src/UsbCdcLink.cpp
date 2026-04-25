@@ -8,19 +8,14 @@
 #include "pico/stdio.h"
 #include "pico/time.h"
 
-// TinyUSB headers ship with pico-sdk only when the SDK was checked
-// out with submodules (the OxiNode Nix flake does this; the bare
-// nixpkgs `pico-sdk` derivation does not). Detect at compile time
-// so the firmware still builds under a stripped-down SDK — falling
-// back to printf-only output. The flake-built path will pick up
-// the real tinyusb-direct path automatically.
-#if __has_include(<tusb.h>) && __has_include(<pico/stdio_usb.h>)
-#  include "pico/stdio_usb.h"
-#  include "tusb.h"
-#  define OXINODE_HAVE_TINYUSB 1
-#else
-#  define OXINODE_HAVE_TINYUSB 0
-#endif
+// First bring-up uses pico_stdio_usb only (printf → tinyusb internally).
+// Direct tud_cdc_n_* access is gated behind a tusb_config.h that the
+// pico-sdk 2.2 stdio_usb path owns; mixing both at the app level
+// pulls in symbols that aren't declared. Stdio path covers JSON-Lines
+// and binary writes (writeRaw uses putchar) — the only thing we lose
+// is host-side command parsing (MODE BIN). Re-enable once we ship a
+// custom USB descriptor — see TODO in firmware/rp2040/README.md.
+#define OXINODE_HAVE_TINYUSB 0
 
 namespace oxinode::rp2040
 {
@@ -190,16 +185,25 @@ namespace oxinode::rp2040
     }
 
     void UsbCdcLink::writeAlive(std::uint32_t tMs, std::uint32_t edges,
-                                std::int16_t hr, std::int16_t spo2)
+                                std::int16_t hr, std::int16_t spo2,
+                                std::int8_t probeRc, std::int8_t configureRc,
+                                std::uint8_t int1, std::uint8_t int2,
+                                std::int32_t lastDrainRc)
     {
         if (m_mode == Mode::Json)
         {
             std::printf(
-                "{\"t\":%lu,\"alive\":1,\"edges\":%lu,\"hr\":%d,\"spo2\":%d}\n",
+                "{\"t\":%lu,\"alive\":1,\"edges\":%lu,\"hr\":%d,\"spo2\":%d,"
+                "\"probe\":%d,\"cfg\":%d,\"int1\":%u,\"int2\":%u,\"drain\":%ld}\n",
                 static_cast<unsigned long>(tMs),
                 static_cast<unsigned long>(edges),
                 static_cast<int>(hr),
-                static_cast<int>(spo2));
+                static_cast<int>(spo2),
+                static_cast<int>(probeRc),
+                static_cast<int>(configureRc),
+                static_cast<unsigned>(int1),
+                static_cast<unsigned>(int2),
+                static_cast<long>(lastDrainRc));
         }
         else
         {

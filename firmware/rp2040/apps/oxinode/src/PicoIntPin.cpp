@@ -58,6 +58,15 @@ namespace oxinode::rp2040
         return s_edges.load(std::memory_order_relaxed);
     }
 
+    bool PicoIntPin::waitForInterruptOrTimeout(std::uint32_t timeoutMs)
+    {
+        std::uint32_t token = 0;
+        // multicore_fifo_pop_timeout_us takes microseconds; cap to
+        // u32 to avoid overflow on large timeouts.
+        const std::uint64_t us = static_cast<std::uint64_t>(timeoutMs) * 1000ULL;
+        return multicore_fifo_pop_timeout_us(us, &token);
+    }
+
     std::uint32_t PicoIntPin::edgeCount()
     {
         return s_edges.load(std::memory_order_relaxed);

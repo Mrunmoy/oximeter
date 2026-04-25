@@ -60,13 +60,12 @@ function(oxinode_add_app app_name)
         oxinode_max3010x
     )
 
-    # tinyusb_device gives us tud_cdc_n_* etc. Linked only when the
-    # SDK actually has a tinyusb submodule (the flake-provided
-    # pico-sdk pulls the submodule; the bare nixpkgs one does not).
-    if(TARGET tinyusb_device)
-        target_link_libraries(${app_name} PRIVATE tinyusb_device tinyusb_board)
-    endif()
-
+    # USB-CDC: pico_enable_stdio_usb brings pico_stdio_usb (and
+    # tinyusb_device transitively) with the SDK's known-good USB
+    # descriptor. Do NOT also link tinyusb_board — its standalone
+    # board-config descriptor conflicts with pico_stdio_usb's and
+    # the host won't enumerate. If we ever want raw tud_cdc_n_*
+    # access we'll roll a custom descriptor and drop pico_stdio_usb.
     pico_enable_stdio_usb(${app_name} 1)
     pico_enable_stdio_uart(${app_name} 0)
 

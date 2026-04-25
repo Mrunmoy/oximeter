@@ -56,8 +56,15 @@ namespace oxinode::rp2040
         void writeStatus(const char* status, const char* reason);
 
         // ── Outgoing — alive heartbeat (1 Hz) ───────────────────
+        // Diagnostic-rich: surfaces probe / configure return codes and
+        // the latest INTR_STATUS_{1,2} so the host can tell from a
+        // single line whether the chip has been talked to and whether
+        // it's currently asserting an interrupt.
         void writeAlive(std::uint32_t tMs, std::uint32_t edges,
-                        std::int16_t hr, std::int16_t spo2);
+                        std::int16_t hr, std::int16_t spo2,
+                        std::int8_t probeRc, std::int8_t configureRc,
+                        std::uint8_t int1, std::uint8_t int2,
+                        std::int32_t lastDrainRc);
 
         // ── Incoming — control parser ───────────────────────────
         // Drains any bytes available on CDC RX and parses complete
