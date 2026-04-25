@@ -32,20 +32,24 @@ will re-fetch it from the URL above.
 
 ## Status of `MAX30102.pdf` in the current checkout
 
-At the time this document was generated, automated fetch attempts to the
-Analog Devices CDN failed from this environment (network restriction).
-**`MAX30102.pdf` is therefore not present in `datasheets/` in this commit.**
-Run `./datasheets/fetch.sh` from a host with normal outbound HTTPS to
-populate it before doing any non-trivial driver work, and check the result
-into a follow-up commit. The Adafruit mirror referenced in earlier
-revisions of this project (`https://cdn-shop.adafruit.com/product-files/3220/MAX30102.pdf`)
-was returning HTTP 404 at the same time and has been removed from the
-fallback list.
+`MAX30102.pdf` is present (917 KB, Rev. 1, October 2018) and the driver in
+`lib/max3010x/` has been cross-checked against pages 10–15 of it byte-for-byte:
 
-If neither source is reachable from your build host, the canonical online
-copy hosted by Analog Devices (linked in the table above) remains the
-authority, and any bring-up work that touches the register map should
-cross-check against the live page rather than a stale local PDF.
+| Item | Datasheet location | Driver source |
+|------|--------------------|---------------|
+| Register addresses (0x00–0xFF, PART_ID = 0x15) | p.10–11 | `Registers.hpp` |
+| INTR_STATUS_1/2 bit positions (A_FULL=B7, PPG_RDY=B6, ALC_OVF=B5, PWR_RDY=B0, DIE_TEMP_RDY=B1) | p.12 | `INT_*` constants in `Registers.hpp` |
+| FIFO_CONFIG layout (SMP_AVE[7:5] \| ROLLOVER[4] \| A_FULL[3:0]) | p.10 | `Max30102::configure` |
+| MODE_CONFIG layout (SHDN[7], RESET[6], MODE[2:0] = 010/011/111) | p.10–11 | `MODE_*` constants |
+| SPO2_CONFIG layout (ADC_RGE[6:5] \| SR[4:2] \| LED_PW[1:0]) | p.10 | `Max30102::configure` |
+| FIFO entry order in SpO2 mode (RED 3 B then IR 3 B per sample) | p.15 Fig.2 | `decodeSpo2Entry` |
+| 18-bit ADC left-justification, MSB always at bit 17, mask 0x3FFFF | p.14 Tbl.1 | `decodeSpo2Entry` / `decodeHrEntry` |
+| FIFO depth = 32, 6 B per entry (SpO2), 192 B max burst | p.14 | `kFifoDepth`, `kBytesPerEntrySpo2` |
+| Reading INTR_STATUS_1 clears the latched interrupt | p.12 | `handleInterrupt` |
+
+If you bump the driver against a newer datasheet revision, regenerate this
+table or just re-run the host gtest suite — the `FakeI2cHal` exercises the
+full register write/burst-read path and will flag any drift.
 
 ---
 
