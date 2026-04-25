@@ -1,10 +1,11 @@
 # OxiNode Hardware
 
-> **DO NOT solder anything until you have read the "Confirm before soldering"
-> section below and matched the silkscreen on your MAX30102 breakout to one
-> of the documented variants. The breakout market is full of clones with
-> swapped pins. Wrong wiring at 3.3 V is recoverable; wrong wiring at 5 V
-> is not.**
+> **First light achieved on 2026-04-25** (commit `da1dd3c`). The pin map below
+> is no longer hypothetical — it is the wiring that produced a stable
+> SpO2 = 98 % reading on the bench. The "Confirm before soldering" section is
+> kept for anyone bringing up a *different* breakout — silkscreen variants
+> in the MAX30102 module market are real, and matching against your specific
+> board is still mandatory before powering it on.
 
 ## What this document is
 
@@ -75,6 +76,22 @@ edge-accessible pair:
   `INT`, `GND`) to come off one side.
 - They are not multiplexed against any of the buttons or LED.
 - `GP6` is the next pin over, giving us `INT` adjacent to `SCL`.
+
+### Verified wiring on the bench
+
+The bring-up board adds two harmless pads to the canonical four:
+
+| MAX30102 pad | RP2040-Zero pad | Role |
+|--------------|-----------------|------|
+| VIN | 3V3 (OUT) | sensor power, 3V3 jumper on breakout shorted |
+| GND | GND | ground |
+| SDA | GP4 | I²C0 SDA |
+| SCL | GP5 | I²C0 SCL |
+| INT | GP6 | open-drain interrupt — drives the RP2040 GPIO IRQ |
+| RD | GP7 | optional — RED LED drive monitor; firmware leaves GP7 as input, no contention |
+| IRQ | GP8 | optional — duplicate of INT on this breakout; firmware leaves GP8 as input |
+
+The RD/IRQ pads are silkscreen labels on the breakout; the underlying chip has only one INT. Wiring them to additional GPIOs costs nothing because the firmware only configures GP4/GP5/GP6.
 
 ### Final wiring — RP2040-Zero ↔ MAX30102
 

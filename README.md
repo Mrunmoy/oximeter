@@ -139,12 +139,13 @@ oxinode/
 
 | Component | State |
 |-----------|-------|
-| Portable driver core (`lib/max3010x/`) | Scaffolded — driver, registers, HR/SpO2 algos in place |
-| Host gtest suite | Scaffolded |
-| RP2040 firmware | Scaffolded — compiles before sensor is wired; ready for bring-up |
-| Python desktop client | Scaffolded — reads JSON-Lines and binary frames |
-| ESP32-S3 firmware | **Skeleton only — phase 2** |
-| First on-board test | Pending soldering (see `docs/HARDWARE.md`) |
+| Portable driver core (`lib/max3010x/`) | **Working** — driver verified byte-for-byte against MAX30102 datasheet pages 10–15 (`docs/DATASHEETS.md`) |
+| Host gtest suite | **27/27 passing** |
+| RP2040 firmware | **First light** — SpO2 = 98 % off finger, JSON-Lines streaming over USB-CDC at `/dev/ttyACM0` |
+| Python desktop client | **Working** — 22/22 pytest, mypy --strict, ruff clean. Untested against live RP2040. |
+| ESP32-S3 firmware | **Skeleton only — phase 2** (untested in Docker) |
+| Open: HrDetector tuning | HR locks at -1 (AVG_1) / 31 (AVG_4). DSP-side fix in `lib/max3010x/src/HrDetector.cpp` — needs band-pass pre-filter + faster envelope α. SpO2 path unaffected. |
+| Open: `MODE BIN` host command parsing | Disabled in current RP2040 firmware (pico_stdio_usb owns the USB descriptor; `tud_cdc_n_*` are gated). JSON-Lines path covers v1. |
 
 ---
 

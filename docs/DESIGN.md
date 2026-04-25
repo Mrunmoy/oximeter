@@ -400,3 +400,124 @@ static constexpr float kSpo2Coeff[5] = {
     return static_cast<uint8_t>(spo2 + 0.5f);
 }
 ```
+
+---
+
+## D-11 — `pico_stdio_usb` owns the USB descriptor; do not also link `tinyusb_board`
+
+**Context.** The first RP2040 firmware build linked `tinyusb_device` and
+`tinyusb_board` in `firmware/rp2040/cmake/oxinode_app.cmake` so the
+`UsbCdcLink` could call `tud_cdc_n_*` directly for binary-mode framing,
+*and* called `pico_enable_stdio_usb(target 1)` so JSON-Lines could be
+emitted via `printf`. The result: the RP2040 booted, but the host USB
+stack never enumerated it. `lsusb` saw nothing on the chip's `2e8a:`
+address even though the board was clearly powered (the MAX30102 power LED
+was lit through the RP2040's 3V3 LDO).
+
+**Decision.** `firmware/rp2040/cmake/oxinode_app.cmake` no longer links
+`tinyusb_device` or `tinyusb_board`. `pico_enable_stdio_usb(target 1)` is
+the single owner of the USB descriptor. `UsbCdcLink::OXINODE_HAVE_TINYUSB`
+is forced to `0`; both JSON-Lines and binary writes go through `printf`
+/ `putchar`, which `pico_stdio_usb` plumbs into TinyUSB internally.
+
+**Why.** `pico_stdio_usb` ships its own minimal CDC USB descriptor and a
+private `tusb_config.h` that defines `CFG_TUD_CDC=1`. Linking
+`tinyusb_board` adds a *second* descriptor — the standalone-app one
+intended for cases where the firmware owns USB itself. The two collide:
+either the linker resolves them in a way that produces a malformed
+configuration, or one descriptor wins and the other's enumeration trap
+masks it. Either way, the host side never gets a valid `GET_DESCRIPTOR`
+response and gives up. Removing `tinyusb_board` is the only clean fix
+short of writing our own custom USB descriptor (which `pico_stdio_usb`
+deliberately makes friction-y to discourage).
+
+**Tradeoff.** Direct `tud_cdc_n_*` calls are inaccessible: the
+declarations are gated behind a `tusb_config.h` that `pico_stdio_usb`
+owns and does not re-export. Concretely, the host control parser
+(`MODE BIN\n` → switch the firmware to binary frames) is dead in the
+current build. JSON-Lines is the only mode emitted, which covers v1.
+A custom USB descriptor — owned by us, dropping `pico_stdio_usb` — is
+the unblock when binary mode becomes load-bearing.
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| Keep both, hope link order is right | Tried; result was zero enumeration. Not deterministic across SDK revisions. |
+| Use `pico_stdio_usb_v2` (pico-sdk experimental) | API surface is unstable across pico-sdk 1.x → 2.x; not worth the churn for a v1 bring-up. |
+| Hand-write a `tusb_config.h` that includes both | Possible but invasive; conflicts with `pico_stdio_usb`'s buffer sizes and endpoints. Defer until binary mode is actually needed. |
+
+The diagnostic that found this: enumeration was silent (no `lsusb` line
+at all, even after BOOTSEL → fresh flash → reset). The fix was the
+single-line removal of the `tinyusb_device tinyusb_board` link clause.
+
+---
+
+## D-12 — Hybrid IRQ + 50 ms polled FIFO drain
+
+**Context.** The MAX30102 INT line is open-drain active-low. The
+canonical embedded path is to wire it to a GPIO, arm a falling-edge
+IRQ, and drain the FIFO from the ISR-bottom-half on every edge. The
+RP2040 firmware does exactly this — `PicoIntPin::init()` arms a
+falling-edge IRQ on `GP6`, the ISR bumps an atomic counter and pushes
+a wake token into the multicore FIFO, core1 blocks on
+`multicore_fifo_pop_blocking()` and calls `Max30102::handleInterrupt()`
+on wake-up. This works.
+
+It also has one failure mode that's painful to debug from a working
+firmware: any wiring fault on `INT`, any silkscreen mislabel, any
+edge-triggered IRQ that didn't arm right, manifests as "the alive
+frame's `edges` field stays at 0 and no samples ever stream". The
+firmware looks alive (USB-CDC up, JSON banner emitted) but the data
+path is silent.
+
+**Decision.** core1 still waits on the multicore FIFO, but with a
+50 ms timeout via the new `PicoIntPin::waitForInterruptOrTimeout()`.
+Whether the wait returns because of an edge or a timeout, core1 then
+calls `Max30102::handleInterrupt()` — which returns 0 cheaply when
+nothing is pending, or reads any queued FIFO entries when there is.
+
+**Why.**
+
+1. **Survives INT-line wiring faults.** The firmware reaches usable
+   data even if `INT` is disconnected entirely. Diagnostic alive
+   frames make the IRQ-vs-polled distinction visible (`edges` rising
+   = IRQ healthy; `edges` stuck = polled drain is carrying us).
+2. **Survives IRQ-routing regressions.** pico-sdk routes GPIO IRQs to
+   the core that armed them, but the exact rules around
+   `multicore_fifo_pop_blocking` and `gpio_set_irq_callback` are
+   subtle enough that small SDK changes can break them silently.
+3. **The cost is negligible.** One INTR_STATUS read per 50 ms is
+   ~50 µs of I²C bus time at 100 kHz — 0.1 % bus utilisation.
+
+**Tradeoff.** If `INT` is healthy, the IRQ path drains the FIFO
+within a sample-period (10 ms) of the edge. The polled path adds
+up to 50 ms of latency *if* the IRQ is silent, which only happens
+during a fault. Under no realistic workload is the polled path the
+hot drain.
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| IRQ-only | Already shown to fail-silent during the bring-up — needed a probe before we knew the IRQ was alive. |
+| Polled-only | Adds 50 ms of consistent latency in the healthy case; wastes sample-rate headroom. |
+| 50 ms polled with fallback to IRQ | Inverted version of what we shipped. Same correctness, but confusing — IRQ should be the fast path. |
+| `tud_task`-driven drain | Couples the data path to USB. Defeats the point of having a separate sample-drain core. |
+
+```cpp
+// firmware/rp2040/apps/oxinode/main.cpp — core1 loop
+for (;;)
+{
+    (void)PicoIntPin::waitForInterruptOrTimeout(50);
+    const int n = s_sensor.handleInterrupt();
+    g_lastDrainRc.store(n, std::memory_order_relaxed);
+    // ... snapshot INTR_STATUS_{1,2} for the alive frame
+}
+```
+
+The polled drain saved the bring-up: the canonical IRQ path *was*
+working, but until we had alive frames carrying live `edges` /
+`int1` / `probe` / `cfg` values we couldn't tell that from a wiring
+fault. Hybrid-by-default keeps the next bring-up's diagnostic loop
+short.

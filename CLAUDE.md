@@ -14,15 +14,17 @@ OxiNode — MAX30102 pulse oximeter showcase. Two firmware targets share one por
 
 ## Hardware status
 
-The sensor is **not soldered** at the time the user typically returns to this repo — check `git log` for any first-bring-up commit before assuming a wired sensor. RP2040 wiring is canonical (see `docs/HARDWARE.md`):
+**RP2040-Zero is wired and working** as of commit `da1dd3c` (first light: SpO2 = 98 % off finger). Canonical wiring (matches `firmware/rp2040/include/board/pins.hpp` and `docs/HARDWARE.md`):
 
 | MAX30102 | RP2040-Zero pin | Notes |
 |----------|-----------------|-------|
-| VIN | 3V3 (OUT) | breakout LDO accepts 3.3–5 V |
+| VIN | 3V3 (OUT) | breakout LDO accepts 3.3–5 V; user's 3V3 jumper is shorted |
 | GND | GND | |
 | SDA | GP4 | I²C0, breakout has 4.7 kΩ pull-up |
 | SCL | GP5 | I²C0 |
 | INT | GP6 | open-drain, active low — internal pull-up enabled in firmware |
+| RD | GP7 | *extra pad on user's breakout, harmless — RED LED drive monitor, not driven by firmware* |
+| IRQ | GP8 | *extra pad on user's breakout, harmless — duplicate of INT on some breakout revisions, not used by firmware* |
 
 Connected USB devices on this workstation (typical):
 

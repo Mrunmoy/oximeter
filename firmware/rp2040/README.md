@@ -3,6 +3,35 @@
 The first prototype path. Targets the Waveshare RP2040-Zero with a
 MAX30102 breakout wired to I²C0 + GP6 INT. Built on pico-sdk 2.2.
 
+## Status
+
+**First light** as of commit `da1dd3c` (2026-04-25). Boots, enumerates
+as USB-CDC `2e8a:000a Raspberry Pi Pico` at `/dev/ttyACM0`, streams
+JSON-Lines, reads SpO2 = 98 % off a finger placed on the optical
+window. See [`/docs/DESIGN.md`](../../docs/DESIGN.md) entries D-11
+(USB descriptor collision) and D-12 (hybrid IRQ + polled drain) for
+the bring-up gotchas.
+
+## Open issues
+
+1. **`HrDetector` does not lock onto a real pulse.** With `cfg.avg
+   = AVG_4` the HR field stuck at 31 BPM (envelope settling-time
+   mismatched to physical time at 25 Hz output rate). With
+   `cfg.avg = AVG_1` (current setting, 100 Hz output) the HR stays
+   at -1 (signal too noisy for the adaptive envelope to cross
+   threshold cleanly). DSP fix lives in
+   `lib/max3010x/src/HrDetector.cpp` — needs (a) 0.5–4 Hz
+   band-pass pre-filter, (b) faster envelope α at startup,
+   (c) tighter peak-fraction. SpO2 path is unaffected (uses
+   AC RMS / DC mean over 1 s window, no peak detection).
+2. **Host control parser disabled.** `MODE BIN\n` / `MODE JSON\n`
+   are not parsed in this build — `pico_stdio_usb` owns the USB
+   descriptor and the `tud_cdc_n_*` declarations are gated behind
+   its private `tusb_config.h`. Forcing `OXINODE_HAVE_TINYUSB=0`
+   in `src/UsbCdcLink.cpp` keeps the build healthy at the cost
+   of always-JSON output. Re-enable by writing a custom USB
+   descriptor and dropping `pico_stdio_usb`. See D-11.
+
 ## Pin map
 
 See `include/board/pins.hpp` (single source of truth) and
@@ -57,19 +86,25 @@ picocom -b 115200 /dev/ttyACM0
 ./scripts/monitor.sh
 ```
 
-Sample stream:
+Sample stream (real capture, finger on sensor):
 
 ```jsonl
-{"status":"boot","build":"v0.1.0","sda":4,"scl":5,"int":6,"i2c_hz":100000}
-{"status":"ready","reason":"build=v0.1.0"}
-{"t":12345,"ir":123456,"red":98765,"hr":72,"spo2":98}
-{"t":12365,"ir":123890,"red":98910,"hr":72,"spo2":98}
-{"t":13345,"alive":1,"edges":42,"hr":72,"spo2":98}
+{"t":22708,"ir":111705,"red":109813,"hr":null,"spo2":98}
+{"t":22708,"ir":111546,"red":109744,"hr":null,"spo2":98}
+{"t":22770,"ir":111377,"red":109653,"hr":null,"spo2":98}
+{"t":22770,"alive":1,"edges":747,"hr":-1,"spo2":98,"probe":0,"cfg":0,"int1":0,"int2":0,"drain":6}
 ```
 
-Send `MODE BIN\n` to switch to length-prefixed CRC-16/CCITT frames
-for the Python desktop client; `MODE JSON\n` switches back. Wire
-format is documented in `/docs/PROTOCOL.md`.
+The diagnostic-rich `alive` frame (added in commit `11a3b15`) carries
+`probe` / `cfg` return codes and live `INTR_STATUS_{1,2}` so a single
+line tells you whether the I²C path is healthy and whether the chip
+is firing interrupts.
+
+Mode-switch commands (`MODE BIN\n` / `MODE JSON\n`) are not parsed in
+the current firmware — see "Open issues" above. The wire format
+itself is fully specified in `/docs/PROTOCOL.md` and implemented in
+the Python client; firmware-side support requires a custom USB
+descriptor.
 
 ## Layout
 

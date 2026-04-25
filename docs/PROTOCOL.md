@@ -22,6 +22,18 @@ For the data-flow this protocol sits inside, see
 > in the schema-version line. Hosts that don't know a `TYPE` MUST skip the
 > frame using the `LEN` field, never assume a length, never crash.
 
+> **Implementation status (2026-04-25).** This document is the contract.
+> The RP2040 firmware emits the JSON-Lines path correctly (verified end-to-end
+> against a live MAX30102), but the *host-to-device* control parser
+> (`MODE BIN\n` / `MODE JSON\n`) is currently **disabled** in the firmware
+> because `pico_stdio_usb` owns the USB descriptor and `tud_cdc_n_read` is
+> gated behind its private `tusb_config.h`. See
+> [`DESIGN.md` D-11](DESIGN.md#d-11--pico_stdio_usb-owns-the-usb-descriptor-do-not-also-link-tinyusb_board).
+> The Python desktop client implements both modes and the CRC math is
+> independently verified (CRC = 0x29B1 for "123456789", 0x5966 for the
+> STOP_BIN frame). When firmware-side parsing is re-enabled — by writing a
+> custom USB descriptor — both directions of the spec become live.
+
 ---
 
 ## 1. Link parameters
