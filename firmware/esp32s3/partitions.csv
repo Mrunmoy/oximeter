@@ -1,0 +1,13 @@
+# PHASE 2 — skeleton; first prototype runs on RP2040
+#
+# Standard 4 MB OTA-capable layout. Matches the IDF default
+# "partitions_two_ota.csv" arrangement — NVS, OTA-data, factory + 2 OTA
+# slots. Sizes are conservative for an app that ships well under 1 MB.
+#
+# Name,   Type, SubType, Offset,   Size,    Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xf000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+factory,  app,  factory, 0x20000,  0x140000,
+ota_0,    app,  ota_0,   0x160000, 0x140000,
+ota_1,    app,  ota_1,   0x2A0000, 0x140000,

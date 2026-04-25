@@ -1,0 +1,42 @@
+# PHASE 2 — skeleton; first prototype runs on RP2040
+#
+# Defaults for OxiNode on the Waveshare ESP32-S3-Zero. Pulls in the same
+# choices we used on esp-clock plus a few oxinode-specific bumps. Run
+# `idf.py menuconfig` to override at build time.
+
+# ── Target ──────────────────────────────────────────────────────────
+CONFIG_IDF_TARGET="esp32s3"
+
+# ── Console / monitor ───────────────────────────────────────────────
+# The S3-Zero exposes only the on-chip USB-Serial-JTAG bridge — no
+# external USB-UART. Route stdio through it so `idf.py monitor` works
+# straight off the same /dev/ttyACM0 we use for flashing.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ── CPU / scheduler ─────────────────────────────────────────────────
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160
+CONFIG_FREERTOS_HZ=1000
+
+# ── Flash / partitions ──────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# ── Wi-Fi (STA + soft-AP fallback) ──────────────────────────────────
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+
+# ── HTTP server ─────────────────────────────────────────────────────
+# Enough room for the embedded HTML response and a handful of WS frames
+# in flight at once.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# ── Stack sizes ─────────────────────────────────────────────────────
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096

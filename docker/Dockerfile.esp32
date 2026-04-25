@@ -1,0 +1,16 @@
+# ESP-IDF build image — produces firmware/esp32s3 .bin without polluting host.
+# Matches esp-clock's convention.
+FROM espressif/idf:release-v5.5
+
+WORKDIR /project
+
+# Pre-install the ESP32-S3 toolchain so first build is fast.
+RUN . ${IDF_PATH}/export.sh && python3 -m pip install --no-cache-dir esptool
+
+# Default: source IDF env and build the S3 firmware.
+CMD ["/bin/bash", "-c", "\
+    . ${IDF_PATH}/export.sh && \
+    cd firmware/esp32s3 && \
+    idf.py set-target esp32s3 && \
+    idf.py build \
+"]

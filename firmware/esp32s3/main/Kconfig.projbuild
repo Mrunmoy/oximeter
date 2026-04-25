@@ -1,0 +1,55 @@
+# PHASE 2 — skeleton; first prototype runs on RP2040
+#
+# Project-level Kconfig for OxiNode. Surfaces Wi-Fi credentials and
+# server ports to `idf.py menuconfig` so they are not hardcoded in the
+# firmware. Soft-AP fields are the fallback the device falls back to
+# when STA join fails — see WifiManager.
+
+menu "OxiNode Configuration"
+
+    config OXINODE_WIFI_SSID
+        string "Wi-Fi STA SSID"
+        default "doobadoo"
+        help
+            SSID of the Wi-Fi network OxiNode tries to join on boot.
+
+    config OXINODE_WIFI_PASSWORD
+        string "Wi-Fi STA password"
+        default ""
+        help
+            Password (PSK) for the Wi-Fi network. Leave blank for an
+            open network.
+
+    config OXINODE_WIFI_AP_SSID
+        string "Soft-AP fallback SSID prefix"
+        default "OxiNode"
+        help
+            If STA join does not succeed inside the timeout window the
+            device drops into soft-AP mode. The actual SSID is
+            "<prefix>-XXXX" where XXXX is the last 16 bits of the MAC
+            in hex.
+
+    config OXINODE_WIFI_AP_PASSWORD
+        string "Soft-AP fallback password"
+        default "oxinode2026"
+        help
+            WPA2-PSK password for the soft-AP fallback. Must be at
+            least 8 characters or empty for an open AP.
+
+    config OXINODE_HTTP_PORT
+        int "HTTP server port"
+        range 1 65535
+        default 80
+        help
+            TCP port the embedded HTTP server listens on. Serves the
+            single-page UI at GET /.
+
+    config OXINODE_WS_PORT
+        int "WebSocket server port"
+        range 1 65535
+        default 81
+        help
+            TCP port the WebSocket endpoint listens on. The browser
+            UI connects to ws://<device-ip>:<port>/ws.
+
+endmenu

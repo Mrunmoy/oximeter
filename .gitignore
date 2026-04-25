@@ -1,0 +1,69 @@
+# Build outputs
+build/
+build-*/
+*.uf2
+*.bin
+*.elf
+*.map
+*.hex
+
+# CMake / Ninja
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# ESP-IDF
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+.idf-tools/
+
+# Pico SDK
+pico_sdk_import.cmake.bak
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+.cache/
+.ccls-cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Direnv / Nix local
+.direnv/
+result
+result-*
+
+# Docker scratch
+.docker-build-cache/
+
+# Coverage
+*.gcno
+*.gcda
+*.gcov
+coverage/
+
+# Captured serial logs
+captures/
+*.pcap
+
+# Ignore the ESP-IDF that gets staged into third_party at first run
+firmware/esp32s3/third_party/esp-idf/
+firmware/esp32s3/third_party/esp-idf-tools/

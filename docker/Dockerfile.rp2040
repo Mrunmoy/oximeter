@@ -1,0 +1,40 @@
+# Pico-SDK build image — produces firmware/rp2040 .uf2 without polluting host.
+# Pinned to debian:bookworm to match what the Pico SDK CI actually uses.
+FROM debian:bookworm-slim
+
+ARG PICO_SDK_TAG=2.2.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PICO_SDK_PATH=/opt/pico-sdk \
+    PICO_BOARD=pico
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        cmake \
+        ninja-build \
+        gcc-arm-none-eabi \
+        libnewlib-arm-none-eabi \
+        libstdc++-arm-none-eabi-newlib \
+        python3 python3-pip \
+        build-essential \
+        pkg-config \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin pico-sdk and pull in submodules (tinyusb required for USB-CDC).
+RUN git clone --depth 1 --branch ${PICO_SDK_TAG} https://github.com/raspberrypi/pico-sdk.git ${PICO_SDK_PATH} \
+    && git -C ${PICO_SDK_PATH} submodule update --init --recursive --depth 1
+
+# picotool for UF2 load + bootsel reboot. Build from the same SDK release.
+RUN git clone --depth 1 --branch ${PICO_SDK_TAG} https://github.com/raspberrypi/picotool.git /tmp/picotool \
+    && cd /tmp/picotool \
+    && cmake -B build -G Ninja -DPICOTOOL_FLAT_INSTALL=1 -DPICO_SDK_PATH=${PICO_SDK_PATH} \
+    && cmake --build build \
+    && cp build/picotool /usr/local/bin/picotool \
+    && rm -rf /tmp/picotool
+
+WORKDIR /project
+
+# Default: build the RP2040 firmware. Mount the repo at /project.
+CMD ["bash", "-c", "cmake -S firmware/rp2040 -B build/rp2040 -G Ninja && cmake --build build/rp2040"]

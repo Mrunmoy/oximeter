@@ -1,0 +1,164 @@
+<!doctype html>
+<!-- PHASE 2 — skeleton; first prototype runs on RP2040 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>OxiNode</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <style>
+    :root {
+      --bg: #0b0f14; --panel: #0f141a; --grid: #334155;
+      --text: #cdd6f4; --muted: #94a3b8; --border: #1f2937;
+      --hr: #f87171; --spo2: #60a5fa; --ir: #86efac;
+      --warn: #f59e0b; --ok: #22c55e;
+    }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+      font-family: -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial; }
+    header { padding: 12px 14px; display: flex; gap: 10px; align-items: center;
+      flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+    header .title { font-weight: 700; }
+    .pill { font-size: 12px; padding: 2px 8px; border: 1px solid var(--border);
+      border-radius: 999px; }
+    .pill.ok { color: var(--ok); border-color: var(--ok); }
+    .pill.warn { color: var(--warn); border-color: var(--warn); }
+    main { padding: 14px; }
+    .row { display: flex; gap: 14px; flex-wrap: wrap; }
+    .card { background: var(--panel); border: 1px solid var(--border);
+      border-radius: 14px; padding: 16px; min-width: 130px; flex: 1; }
+    .card .label { font-size: 12px; color: var(--muted); }
+    .card .value { font-size: 48px; font-weight: 700; line-height: 1; margin-top: 4px; }
+    .card .unit  { font-size: 14px; color: var(--muted); margin-left: 6px; }
+    .card.hr   .value { color: var(--hr); }
+    .card.spo2 .value { color: var(--spo2); }
+    #chartCard { margin-top: 14px; }
+    #chartCard .label { display: flex; justify-content: space-between; }
+    canvas { width: 100%; height: 220px; display: block; background: #060a0f;
+      border-radius: 10px; margin-top: 8px; }
+    footer { padding: 10px 14px; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="title">OxiNode</span>
+    <span id="status" class="pill warn">connecting…</span>
+    <span id="finger" class="pill warn">no finger</span>
+  </header>
+  <main>
+    <div class="row">
+      <div class="card hr">
+        <div class="label">Heart rate</div>
+        <div><span id="hr" class="value">--</span><span class="unit">bpm</span></div>
+      </div>
+      <div class="card spo2">
+        <div class="label">SpO₂</div>
+        <div><span id="spo2" class="value">--</span><span class="unit">%</span></div>
+      </div>
+    </div>
+    <div id="chartCard" class="card">
+      <div class="label"><span>IR — last 60 s</span><span id="rate">0 sps</span></div>
+      <canvas id="cv"></canvas>
+    </div>
+  </main>
+  <footer>WebSocket <code id="ws-url">ws://…/ws</code> · phase 2 skeleton</footer>
+  <script>
+    (() => {
+      const $ = id => document.getElementById(id);
+      const hrEl = $('hr'), spoEl = $('spo2'), stEl = $('status'), fgEl = $('finger');
+      const rtEl = $('rate'), urlEl = $('ws-url');
+      const cv = $('cv'), cx = cv.getContext('2d');
+
+      // Resize canvas to its CSS box. Phones rotate; redraw on resize.
+      const fitCanvas = () => {
+        const dpr = window.devicePixelRatio || 1;
+        const w = cv.clientWidth, h = cv.clientHeight;
+        cv.width = Math.floor(w * dpr); cv.height = Math.floor(h * dpr);
+        cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      };
+      window.addEventListener('resize', fitCanvas); fitCanvas();
+
+      // ---- Ring buffer of IR samples for the chart ------------------
+      const SECS = 60, RATE_HINT = 100;          // 100 Hz default sampling
+      const CAP  = SECS * RATE_HINT;
+      const buf  = new Float32Array(CAP);
+      let head = 0, count = 0;
+      let irMin = Infinity, irMax = -Infinity;
+      let lastFrameMs = 0, framesIn = 0, lastRateAt = 0;
+
+      const pushIr = (v) => {
+        buf[head] = v; head = (head + 1) % CAP;
+        if (count < CAP) count++;
+        if (v < irMin) irMin = v;
+        if (v > irMax) irMax = v;
+      };
+
+      // ---- Renderer -------------------------------------------------
+      const draw = () => {
+        const w = cv.clientWidth, h = cv.clientHeight;
+        cx.clearRect(0, 0, w, h);
+        // grid
+        cx.globalAlpha = 0.25; cx.strokeStyle = '#334155'; cx.lineWidth = 1;
+        cx.beginPath();
+        for (let x = 0; x < w; x += 30) { cx.moveTo(x, 0); cx.lineTo(x, h); }
+        for (let y = 0; y < h; y += 30) { cx.moveTo(0, y); cx.lineTo(w, y); }
+        cx.stroke(); cx.globalAlpha = 1;
+        // waveform — newest on the right
+        if (count > 1 && irMax > irMin) {
+          const span = irMax - irMin || 1;
+          cx.strokeStyle = '#86efac'; cx.lineWidth = 2; cx.beginPath();
+          for (let x = 0; x < w; x++) {
+            const idx = (head - 1 - Math.floor(x * count / w) + CAP) % CAP;
+            const v = buf[idx];
+            const y = h - ((v - irMin) / span) * (h * 0.92) - h * 0.04;
+            if (x === 0) cx.moveTo(w - 1 - x, y); else cx.lineTo(w - 1 - x, y);
+          }
+          cx.stroke();
+        }
+        requestAnimationFrame(draw);
+      };
+      requestAnimationFrame(draw);
+
+      // ---- WebSocket --------------------------------------------------
+      let ws = null;
+      const connect = () => {
+        const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+        // The firmware splits HTTP (default :80, this page) and the
+        // WebSocket endpoint (default :81). location.hostname strips
+        // the page's port for us; we hardcode the WS port to 81 here
+        // because the embedded HTML is baked at build time and can't
+        // see Kconfig values directly.
+        const WS_PORT = 81;
+        const url = `${proto}://${location.hostname}:${WS_PORT}/ws`;
+        urlEl.textContent = url;
+        ws = new WebSocket(url);
+        ws.onopen = () => { stEl.textContent = 'connected'; stEl.className = 'pill ok'; };
+        ws.onclose = () => { stEl.textContent = 'disconnected — retrying…';
+          stEl.className = 'pill warn'; setTimeout(connect, 1000); };
+        ws.onerror = () => { stEl.textContent = 'error'; stEl.className = 'pill warn'; };
+        ws.onmessage = (ev) => {
+          if (typeof ev.data !== 'string') return;
+          try {
+            const m = JSON.parse(ev.data);
+            const ir = +m.ir || 0, red = +m.red || 0;
+            const hr = +m.hr  || 0, sp  = +m.spo2 || 0;
+            pushIr(ir);
+            // "finger detected" heuristic — same one HeartNode uses.
+            const finger = ir > 50000;
+            fgEl.textContent = finger ? 'finger detected' : 'no finger';
+            fgEl.className = 'pill ' + (finger ? 'ok' : 'warn');
+            hrEl.textContent  = hr  > 0 ? hr.toFixed(0) : '--';
+            spoEl.textContent = sp  > 0 ? sp.toFixed(0) : '--';
+            framesIn++;
+            const now = performance.now();
+            if (now - lastRateAt > 1000) {
+              const dt = (now - lastRateAt) / 1000 || 1;
+              rtEl.textContent = `${(framesIn / dt).toFixed(0)} sps`;
+              framesIn = 0; lastRateAt = now;
+            }
+          } catch (_) { /* malformed — ignore */ }
+        };
+      };
+      connect();
+    })();
+  </script>
+</body>
+</html>
