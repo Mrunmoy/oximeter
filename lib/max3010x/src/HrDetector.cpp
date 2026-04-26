@@ -24,11 +24,42 @@ namespace oxinode::max3010x
         return (lo > midHi) ? lo : midHi;
     }
 
+    uint8_t HrDetector::medianOf5(uint8_t a, uint8_t b, uint8_t c,
+                                  uint8_t d, uint8_t e)
+    {
+        // 5-sample insertion sort then pick index 2. The compiler
+        // unrolls this into a fixed dependency chain on Cortex-M0+
+        // (no branch-mispredict cost) and the whole call inlines
+        // away in the only place that matters (`pushOutput`).
+        uint8_t s[5] = {a, b, c, d, e};
+        for (int i = 1; i < 5; ++i)
+        {
+            const uint8_t x = s[i];
+            int j = i;
+            while (j > 0 && s[j - 1] > x)
+            {
+                s[j] = s[j - 1];
+                --j;
+            }
+            s[j] = x;
+        }
+        return s[2];
+    }
+
     void HrDetector::pushOutput(uint8_t bpm)
     {
         m_bpmHistory[m_bpmHistoryHead] = bpm;
         m_bpmHistoryHead = (m_bpmHistoryHead + 1) % kBpmMedianN;
-        m_bpm = medianOf3(m_bpmHistory[0], m_bpmHistory[1], m_bpmHistory[2]);
+        // kBpmMedianN is the static buffer width — currently 5.
+        // The static_assert below is a maintenance aid: if a future
+        // change tweaks kBpmMedianN, this fails the build and the
+        // author has to either update both sites or generalise
+        // pushOutput to call a length-N median.
+        static_assert(kBpmMedianN == 5,
+                      "pushOutput hard-codes a width-5 median; update if "
+                      "kBpmMedianN changes (or rewire to a generic medianOfN)");
+        m_bpm = medianOf5(m_bpmHistory[0], m_bpmHistory[1], m_bpmHistory[2],
+                          m_bpmHistory[3], m_bpmHistory[4]);
     }
 
     void HrDetector::push(uint32_t /*tMs*/, int32_t ir)

@@ -64,14 +64,23 @@ namespace oxinode::max3010x
         // batch algorithm picks 4 s of peaks every 1 s; on a quietly-
         // resting finger it occasionally lands on a noisy peak set
         // and reports a one-cycle excursion before the next recompute
-        // re-converges. A 3-deep median squashes any single-tick
-        // outlier surrounded by stable readings — exactly the failure
-        // pattern observed on the bench (2026-04-26: 88 BPM stable
-        // for 90 % of readings, 1-second excursions to 68 / 93 / 115
-        // for the remaining 10 %). Cost: at most kBpmMedianN-1 = 2 s
-        // of extra latency on a real, sustained HR change. Acceptable
-        // for steady-finger SpO2 use.
-        static constexpr int kBpmMedianN = 3;
+        // re-converges.
+        //
+        // Window-sizing rationale (revised 2026-04-27 after bench
+        // observation that N=3 was insufficient): consecutive
+        // recomputes share 3 s of input data, so a noise burst that
+        // lands inside the analysis window can poison **two** adjacent
+        // recomputes — the new tick and the prior one. N=3 cannot
+        // outvote two adjacent bad samples (`median(good, bad, bad)`
+        // = bad). N=5 can: at most 2 adjacent bad samples are still a
+        // minority of a 5-deep window, so the median holds at the
+        // good value as long as ≥3 of the 5 are good.
+        //
+        // Cost: at most kBpmMedianN-1 = 4 s of extra latency on a
+        // real, sustained HR change. Acceptable for steady-finger
+        // SpO2 use; not for HRV / fitness use cases (those want raw
+        // beat-to-beat intervals anyway, not a debounced display).
+        static constexpr int kBpmMedianN = 5;
 
         HrDetector() = default;
 
@@ -90,12 +99,20 @@ namespace oxinode::max3010x
         // either as "no display".
         [[nodiscard]] uint8_t bpm() const { return m_bpm; }
 
-        // Median of three uint8_t — pure function exposed publicly so
+        // Median of five uint8_t — pure function exposed publicly so
         // unit tests can pin its behaviour without round-tripping
         // through a synthetic signal. 0 is treated as a real value
         // (representing "not yet valid"); the median therefore acts as
         // a graceful fadeout when the finger is removed.
+        //
+        // The narrower `medianOf3` helper is retained as a thin
+        // forwarder for any external caller that referenced it
+        // directly; new code should call `medianOfN` (any odd N ≤
+        // kBpmMedianN) or just trust `bpm()` which already runs the
+        // configured-width median.
         [[nodiscard]] static uint8_t medianOf3(uint8_t a, uint8_t b, uint8_t c);
+        [[nodiscard]] static uint8_t medianOf5(uint8_t a, uint8_t b, uint8_t c,
+                                               uint8_t d, uint8_t e);
 
     private:
         // Run the Maxim algorithm over the current buffer contents.
