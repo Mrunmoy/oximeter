@@ -92,11 +92,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fps", type=float, default=15.0,
                    help="animation frame rate (default: %(default)s)")
     args = p.parse_args()
+    # Validate so a typo'd `--window-sec 0` (or worse, a negative
+    # value) doesn't silently produce a zero-length buffer that the
+    # animation can never draw — the symptom would be "the script
+    # runs but the window stays blank forever," which is genuinely
+    # mysterious. Fail fast at the argparse layer instead.
+    if args.window_sec <= 0:
+        p.error(f"--window-sec must be > 0 (got {args.window_sec})")
+    if args.window is not None and args.window <= 0:
+        p.error(f"--window must be > 0 (got {args.window})")
+    if args.fps <= 0:
+        p.error(f"--fps must be > 0 (got {args.fps})")
     if args.window is None:
         # 25 Hz is the firmware's post-AVG_4 output rate; see
         # HrDetector::kFs. The buffer is sized in samples at that
         # rate so the user can think in time units. Round to a
-        # tidy integer count.
+        # tidy integer count, with a 50-sample floor so a really
+        # tiny --window-sec doesn't produce a buffer too small for
+        # the animation to draw at all.
         args.window = max(50, int(round(args.window_sec * 25.0)))
     return args
 
@@ -317,15 +330,23 @@ def main() -> int:
         ir_demean = ir - ir.mean()
         ln_ac.set_data(t, ir_demean)
 
+        # Auto-rescale each axis independently — but skip any axis
+        # the user has manually zoomed. `auto_x` / `auto_y` are
+        # initialised True and flipped to False on the first
+        # mpl_connect("scroll_event") for that axis. Double-click /
+        # 'r' resets them.
         for ax in (ax_raw, ax_ac, ax_hr, ax_sp):
-            ax.set_xlim(t[0], t[-1] + 0.1)
-        ir_lo, ir_hi = int(ir.min()), int(ir.max())
-        red_lo, red_hi = int(red.min()), int(red.max())
-        lo = min(ir_lo, red_lo) - 2000
-        hi = max(ir_hi, red_hi) + 2000
-        ax_raw.set_ylim(lo, hi)
-        ac_lim = max(2000, int(np.abs(ir_demean).max()) + 500)
-        ax_ac.set_ylim(-ac_lim, ac_lim)
+            if auto_x[ax]:
+                ax.set_xlim(t[0], t[-1] + 0.1)
+        if auto_y[ax_raw]:
+            ir_lo, ir_hi = int(ir.min()), int(ir.max())
+            red_lo, red_hi = int(red.min()), int(red.max())
+            lo = min(ir_lo, red_lo) - 2000
+            hi = max(ir_hi, red_hi) + 2000
+            ax_raw.set_ylim(lo, hi)
+        if auto_y[ax_ac]:
+            ac_lim = max(2000, int(np.abs(ir_demean).max()) + 500)
+            ax_ac.set_ylim(-ac_lim, ac_lim)
 
         # ── HR + SpO2 plots (only valid samples) ────────────────────
         hr_mask = hr > 0
@@ -413,13 +434,17 @@ def main() -> int:
     #     no modifier  → x-axis only (time)
     #     shift+wheel  → y-axis only (counts / BPM / %)
     #     ctrl+wheel   → both
-    # Auto-scaling in the FuncAnimation overrides x-zoom on every
-    # frame, so wheel zoom on x is most useful when paused — we
-    # therefore auto-pause the animation on the first wheel event
-    # and resume on a double-click anywhere in the figure.
+    #
+    # Live updates KEEP RUNNING after a manual zoom — the only thing
+    # that stops is the per-axis auto-rescale in `update()`, so new
+    # samples flow into the user-chosen view. To return an axis to
+    # auto-following the live window, double-click inside it (or press
+    # 'r' for "reset all"). The `auto_x` / `auto_y` flags below are
+    # the source of truth `update()` consults each frame.
     ZOOM_FACTOR = 1.25
-
-    state = {"paused": False}
+    DATA_AXES = (ax_raw, ax_ac, ax_hr, ax_sp)
+    auto_x = {ax: True for ax in DATA_AXES}
+    auto_y = {ax: True for ax in DATA_AXES}
 
     def _scale(lo: float, hi: float, focus: float, factor: float) -> tuple[float, float]:
         return (focus - (focus - lo) * factor,
@@ -429,36 +454,44 @@ def main() -> int:
         ax = event.inaxes
         if ax is None or event.xdata is None or event.ydata is None:
             return
-        # Only the four data panels — leave the header alone.
-        if ax not in (ax_raw, ax_ac, ax_hr, ax_sp):
+        if ax not in DATA_AXES:
             return
         factor = (1.0 / ZOOM_FACTOR) if event.button == "up" else ZOOM_FACTOR
         key = (event.key or "").lower()
-        zoom_x = "shift" not in key  # default & ctrl: yes; shift-only: no
-        zoom_y = ("shift" in key) or ("ctrl" in key) or (key == "")
+        # Modifier rules — match the docstring exactly:
+        #     no modifier → x-axis only (time)
+        #     shift+wheel → y-axis only
+        #     ctrl+wheel  → both
+        zoom_x = ("shift" not in key) or ("ctrl" in key)
+        zoom_y = ("shift" in key)     or ("ctrl" in key)
         if zoom_x:
             x0, x1 = ax.get_xlim()
             ax.set_xlim(*_scale(x0, x1, event.xdata, factor))
+            auto_x[ax] = False
         if zoom_y:
             y0, y1 = ax.get_ylim()
             ax.set_ylim(*_scale(y0, y1, event.ydata, factor))
-        # Pause animation on first zoom so the auto-rescale doesn't
-        # immediately overwrite the user's view. Double-click resumes.
-        if not state["paused"]:
-            ani.event_source.stop()
-            state["paused"] = True
-            txt_status.set_text(
-                "PAUSED (double-click to resume) — wheel = zoom x, "
-                "shift+wheel = y, ctrl+wheel = both")
+            auto_y[ax] = False
         fig.canvas.draw_idle()
 
     def on_dblclick(event):
-        if event.dblclick and state["paused"]:
-            ani.event_source.start()
-            state["paused"] = False
+        # Double-click an axis → return it to auto-follow.
+        if not event.dblclick:
+            return
+        if event.inaxes in DATA_AXES:
+            auto_x[event.inaxes] = True
+            auto_y[event.inaxes] = True
+
+    def on_key(event):
+        # 'r' = reset zoom on every panel.
+        if event.key in ("r", "R"):
+            for ax in DATA_AXES:
+                auto_x[ax] = True
+                auto_y[ax] = True
 
     fig.canvas.mpl_connect("scroll_event", on_scroll)
     fig.canvas.mpl_connect("button_press_event", on_dblclick)
+    fig.canvas.mpl_connect("key_press_event", on_key)
 
     interval_ms = max(1, int(1000.0 / args.fps))
     # blit=False because the bands (PolyCollection) are recreated each
