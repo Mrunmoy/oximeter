@@ -81,6 +81,7 @@ namespace
     using oxinode::rp2040::FAULT_STAGNANT_CONSUMER;
 
     using oxinode::max3010x::AdcRange;
+    using oxinode::max3010x::FifoAFull;
     using oxinode::max3010x::ISampleObserver;
     using oxinode::max3010x::Max30102;
     using oxinode::max3010x::Mode;
@@ -223,7 +224,13 @@ namespace
         cfg.rate                     = SampleRate::SR_100;
         cfg.pulseWidth               = PulseWidth::PW_411_18BIT;
         cfg.adcRange                 = AdcRange::RANGE_4096;
-        cfg.fifoAlmostFullThreshold  = 17;
+        // Chip default: trigger A_FULL when 17 entries are unread.
+        // Note PPG_RDY (per-sample IRQ) is also enabled by the
+        // driver, so A_FULL is rarely the wake source in practice —
+        // setting this conservatively keeps the latched-once-FIFO-
+        // is-full safety net intact without changing steady-state
+        // IRQ rate.
+        cfg.fifoAFull                = FifoAFull::Unread17;
         cfg.fifoRollover             = true;
         return cfg;
     }

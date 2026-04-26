@@ -88,6 +88,74 @@ namespace
         EXPECT_EQ(0xC0, hal.reg(reg::INTR_ENABLE_1));
     }
 
+    // ── FifoAFull strong typing (regression for the 4-bit truncation
+    // footgun, see DESIGN.md follow-up to D-15). ──────────────────────
+
+    TEST(Max30102Test, FifoAFullDefaultEncodesTo0x0F)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        Max30102::Config cfg{};   // cfg.fifoAFull defaults to Unread17
+        ASSERT_EQ(0, dev.configure(cfg));
+        // Bottom 4 bits of FIFO_CONFIG must be 0x0F (chip POR default).
+        EXPECT_EQ(0x0F, hal.reg(reg::FIFO_CONFIG) & 0x0F);
+    }
+
+    TEST(Max30102Test, FifoAFullOnFullEncodesTo0x00)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        Max30102::Config cfg{};
+        cfg.fifoAFull = oxinode::max3010x::FifoAFull::OnFull;
+        ASSERT_EQ(0, dev.configure(cfg));
+        // OnFull → 32 unread → register field = 0.
+        EXPECT_EQ(0x00, hal.reg(reg::FIFO_CONFIG) & 0x0F);
+    }
+
+    TEST(Max30102Test, FifoAFullExplicitMidRangeRoundtripsExactly)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        Max30102::Config cfg{};
+        // Pick a mid-range value (Unread24 = 0x08 → trigger at 24 unread).
+        cfg.fifoAFull = oxinode::max3010x::FifoAFull::Unread24;
+        ASSERT_EQ(0, dev.configure(cfg));
+        EXPECT_EQ(0x08, hal.reg(reg::FIFO_CONFIG) & 0x0F);
+    }
+
+    TEST(Max30102Test, FifoAFullOnUnreadHelperBuildsCorrectValue)
+    {
+        // Compile-time helper: fifoAFullOnUnread<N>() → FifoAFull such
+        // that the chip triggers when N entries are unread.
+        // Encoding: register value = 32 − N. Verified end-to-end via
+        // Configure → register-file readback.
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        Max30102::Config cfg{};
+        cfg.fifoAFull = oxinode::max3010x::fifoAFullOnUnread<20>();
+        ASSERT_EQ(0, dev.configure(cfg));
+        EXPECT_EQ(static_cast<uint8_t>(32 - 20),
+                  hal.reg(reg::FIFO_CONFIG) & 0x0F);
+    }
+
+    TEST(Max30102Test, FifoAFullDoesNotPolluteOtherFifoConfigBits)
+    {
+        // Regression: setting cfg.fifoAFull must not change SMP_AVE
+        // (bits [7:5]) or FIFO_ROLLOVER_EN (bit [4]). Pre-fix code
+        // masked `& 0x0F` which "worked" for in-range u8 but masked
+        // 17 to 1; the enum form has no mask but is still required
+        // to leave the upper bits exactly as encoded by avg/rollover.
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        Max30102::Config cfg{};
+        cfg.avg          = oxinode::max3010x::SampleAveraging::AVG_4;
+        cfg.fifoRollover = true;
+        cfg.fifoAFull    = oxinode::max3010x::FifoAFull::OnFull;
+        ASSERT_EQ(0, dev.configure(cfg));
+        // (0b010 << 5) | (1 << 4) | 0x00 = 0x50.
+        EXPECT_EQ(0x50, hal.reg(reg::FIFO_CONFIG));
+    }
+
     TEST(Max30102Test, ResetClearsState)
     {
         FakeI2cHal hal;

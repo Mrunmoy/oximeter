@@ -70,10 +70,14 @@ namespace oxinode::max3010x
             // while 0x3F locks cleanly to a single resting BPM.
             uint8_t          redLedPa  = 0x3F;
             uint8_t          irLedPa   = 0x3F;
-            // FIFO almost-full triggers when (32 - threshold) entries
-            // remain unread — i.e. threshold == 17 means "fire IRQ when
-            // 15 unread entries are buffered". 0x0F is the chip default.
-            uint8_t          fifoAlmostFullThreshold = 0x0F;
+            // FIFO_A_FULL trigger threshold (FIFO_CONFIG[3:0]). The
+            // chip fires INT.A_FULL when (32 − raw value) unread
+            // entries are queued; encoding details and the
+            // `fifoAFullOnUnread<N>()` helper live next to the enum
+            // in `Registers.hpp`. Default is the chip's own POR value
+            // (17 unread). Strongly-typed so an out-of-range raw u8
+            // can no longer silently truncate to 4 bits.
+            FifoAFull        fifoAFull = FifoAFull::Unread17;
             // Roll over rather than freeze when the FIFO is full —
             // we'd rather lose old samples than block the chip waiting.
             bool             fifoRollover = true;
