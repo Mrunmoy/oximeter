@@ -3,13 +3,30 @@
 Live JSON-Lines visualizer for the OxiNode RP2040 firmware.
 
 Reads newline-delimited JSON objects from /dev/ttyACM0 (or another
-serial device) and animates a four-panel matplotlib figure:
+serial device) and animates a five-region matplotlib figure:
 
-    ┌──────────────────────────┬───────────────────────┐
-    │ IR + RED raw counts      │ HR (BPM)              │
-    ├──────────────────────────┼───────────────────────┤
-    │ IR demeaned (cardiac AC) │ SpO₂ (%)              │
-    └──────────────────────────┴───────────────────────┘
+    ┌─────────────────────────────────────────────┐
+    │ Header strip  HR / SpO₂ / PI big readouts   │
+    │               + LOCKED / ACQUIRING pill     │
+    ├──────────────────────────┬──────────────────┤
+    │ IR + RED raw counts      │ HR (BPM)         │
+    │                          │  + median + IQR  │
+    ├──────────────────────────┼──────────────────┤
+    │ IR demeaned (cardiac AC) │ SpO₂ (%)         │
+    │                          │  + median + IQR  │
+    └──────────────────────────┴──────────────────┘
+
+Header readouts are sourced from the firmware's `hr` / `spo2`
+fields (already median-of-N debounced inside HrDetector — see
+docs/SOFTWARE.md §4 and the D-17 design entry). Perfusion index
+is computed on the host from a rolling window of IR samples.
+
+The HR/SpO2 panels overlay rolling 5-th/95-th percentile bands
+and a median line so an outlier blip is visible *as* a blip
+rather than masquerading as a stable reading. The "LOCKED /
+ACQUIRING" pill is the at-a-glance signal: green LOCKED when
+the latest valid HR has held within a tight band for several
+seconds, orange ACQUIRING otherwise.
 
 Usage (inside the Nix dev shell):
 
@@ -38,6 +55,16 @@ import numpy as np
 import serial
 
 
+# Minimum number of valid HR samples before LOCKED can fire.
+LOCK_MIN_SAMPLES = 25 * 5    # ~5 s of valid HR
+# Maximum |HR - median| over the last LOCK_MIN_SAMPLES samples for LOCKED.
+LOCK_TOLERANCE_BPM = 4
+# IQR band percentiles. 5/95 catches obvious outliers without being so
+# tight that normal rolling jitter looks alarming.
+BAND_LOW_PCT = 5.0
+BAND_HIGH_PCT = 95.0
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -54,7 +81,7 @@ def parse_args() -> argparse.Namespace:
 
 # ── shared rolling buffers ─────────────────────────────────────────────────
 class Buffers:
-    """Four parallel deques. The reader thread appends, the animation
+    """Five parallel deques. The reader thread appends, the animation
     thread reads under a lock for atomic snapshots."""
 
     def __init__(self, capacity: int) -> None:
@@ -123,6 +150,34 @@ def reader_loop(port: str, baud: int, buffers: Buffers,
             time.sleep(1.0)
 
 
+# ── derived signals ────────────────────────────────────────────────────────
+def perfusion_index(ir: np.ndarray) -> float:
+    """Maxim AN6845 §"Perfusion Index": PI = (AC_pp / DC) × 100. We use
+    peak-to-peak over the rolling window for AC, and the window mean
+    for DC. Returns 0.0 if the window is too short or DC is zero."""
+    if ir.size < 25 or ir.mean() <= 0:
+        return 0.0
+    ac_pp = float(ir.max() - ir.min())
+    return (ac_pp / float(ir.mean())) * 100.0
+
+
+def lock_state(hr: np.ndarray) -> tuple[str, str]:
+    """Return ("LOCKED"|"ACQUIRING", colour) for the header pill.
+
+    LOCKED: have at least LOCK_MIN_SAMPLES recent samples whose HR is
+    valid and within ±LOCK_TOLERANCE_BPM of the window median. This
+    matches the "did the median-of-N-output finish settling?" check
+    a clinician implicitly does before trusting the displayed BPM."""
+    valid = hr[hr > 0]
+    if valid.size < LOCK_MIN_SAMPLES:
+        return ("ACQUIRING", "#e09040")
+    recent = valid[-LOCK_MIN_SAMPLES:]
+    med = float(np.median(recent))
+    if float(np.abs(recent - med).max()) <= LOCK_TOLERANCE_BPM:
+        return ("LOCKED", "#40c060")
+    return ("ACQUIRING", "#e09040")
+
+
 # ── plot ───────────────────────────────────────────────────────────────────
 def main() -> int:
     args = parse_args()
@@ -135,15 +190,43 @@ def main() -> int:
     rx.start()
 
     plt.style.use("dark_background")
-    fig, axes = plt.subplots(2, 2, figsize=(12, 7))
+    fig = plt.figure(figsize=(13, 8))
     fig.canvas.manager.set_window_title(f"OxiNode live — {args.port}")
-    fig.suptitle("OxiNode live — JSON-Lines @ /dev/ttyACM0", fontsize=11)
 
-    # Top-left: raw IR + RED
-    ax_raw = axes[0, 0]
+    # ── Header strip (gridspec row 0) ──────────────────────────────────
+    # Left half: big HR/SpO2/PI numbers. Right half: lock pill.
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.1, 2.5, 2.5],
+                          hspace=0.45, wspace=0.18,
+                          left=0.06, right=0.97, top=0.97, bottom=0.06)
+    ax_hdr = fig.add_subplot(gs[0, :])
+    ax_hdr.set_axis_off()
+
+    txt_hr = ax_hdr.text(0.02, 0.55, "HR --",  fontsize=34, color="#ff5050",
+                         family="monospace", weight="bold",
+                         transform=ax_hdr.transAxes, va="center")
+    txt_sp = ax_hdr.text(0.22, 0.55, "SpO₂ --%", fontsize=28, color="#50a0ff",
+                         family="monospace", weight="bold",
+                         transform=ax_hdr.transAxes, va="center")
+    txt_pi = ax_hdr.text(0.45, 0.55, "PI --%",  fontsize=24, color="#aaa",
+                         family="monospace",
+                         transform=ax_hdr.transAxes, va="center")
+    txt_pill_bg = ax_hdr.text(0.78, 0.55, "  ACQUIRING  ",
+                              fontsize=20, color="white",
+                              family="monospace", weight="bold",
+                              transform=ax_hdr.transAxes, va="center", ha="center",
+                              bbox=dict(boxstyle="round,pad=0.45",
+                                        fc="#e09040", ec="none"))
+    txt_status = ax_hdr.text(0.02, 0.05,
+                             "waiting for samples…",
+                             fontsize=9, color="#888",
+                             family="monospace",
+                             transform=ax_hdr.transAxes, va="bottom")
+
+    # ── Top-left: raw IR + RED ────────────────────────────────────────
+    ax_raw = fig.add_subplot(gs[1, 0])
     ax_raw.set_title("IR / RED (raw 18-bit ADC counts)")
     ax_raw.set_ylabel("counts")
-    ln_ir,  = ax_raw.plot([], [], lw=1.0, color="#ff5050", label="IR (880 nm)")
+    ln_ir, = ax_raw.plot([], [], lw=1.0, color="#ff5050", label="IR (880 nm)")
     ln_red, = ax_raw.plot([], [], lw=1.0, color="#50a0ff", label="RED (660 nm)")
     ax_raw.axhline(150_000, ls=":", lw=0.7, color="#888",
                    label="AN6845 finger floor 150 K")
@@ -152,8 +235,8 @@ def main() -> int:
     ax_raw.legend(loc="lower right", fontsize=8)
     ax_raw.grid(True, alpha=0.2)
 
-    # Bottom-left: IR demeaned (the cardiac AC waveform — what HrDetector sees)
-    ax_ac = axes[1, 0]
+    # ── Bottom-left: IR demeaned (cardiac AC) ─────────────────────────
+    ax_ac = fig.add_subplot(gs[2, 0])
     ax_ac.set_title("IR demeaned (cardiac AC waveform)")
     ax_ac.set_xlabel("time (s)")
     ax_ac.set_ylabel("counts (Δ from mean)")
@@ -161,53 +244,53 @@ def main() -> int:
     ax_ac.axhline(0, ls="-", lw=0.4, color="#666")
     ax_ac.grid(True, alpha=0.2)
 
-    # Top-right: HR
-    ax_hr = axes[0, 1]
-    ax_hr.set_title("Heart rate (BPM)")
+    # ── Top-right: HR + median + IQR band ─────────────────────────────
+    ax_hr = fig.add_subplot(gs[1, 1])
+    ax_hr.set_title("Heart rate (BPM) — sample, median, 5-95 % band")
     ax_hr.set_ylabel("BPM")
     ax_hr.set_ylim(30, 180)
-    ln_hr, = ax_hr.plot([], [], lw=1.5, color="#ff5050", drawstyle="steps-post")
-    ax_hr.axhspan(60, 100, alpha=0.07, color="#50ff50",
+    ln_hr,     = ax_hr.plot([], [], lw=1.2, color="#ff8080",
+                            drawstyle="steps-post", alpha=0.8, label="sample")
+    ln_hr_med, = ax_hr.plot([], [], lw=2.0, color="#ff5050",
+                            label="median (rolling)")
+    poly_hr = ax_hr.fill_between([0, 1], 0, 0, color="#ff5050",
+                                 alpha=0.15, label="5–95 %")
+    ax_hr.axhspan(60, 100, alpha=0.05, color="#50ff50",
                   label="resting normal")
     ax_hr.legend(loc="lower right", fontsize=8)
     ax_hr.grid(True, alpha=0.2)
 
-    # Bottom-right: SpO2
-    ax_sp = axes[1, 1]
-    ax_sp.set_title("SpO₂ (%)")
+    # ── Bottom-right: SpO2 + median + IQR band ────────────────────────
+    ax_sp = fig.add_subplot(gs[2, 1])
+    ax_sp.set_title("SpO₂ (%) — sample, median, 5-95 % band")
     ax_sp.set_xlabel("time (s)")
     ax_sp.set_ylabel("%")
     ax_sp.set_ylim(80, 100)
-    ln_sp, = ax_sp.plot([], [], lw=1.5, color="#50a0ff", drawstyle="steps-post")
-    ax_sp.axhspan(95, 100, alpha=0.07, color="#50ff50",
+    ln_sp,     = ax_sp.plot([], [], lw=1.2, color="#80c0ff",
+                            drawstyle="steps-post", alpha=0.8, label="sample")
+    ln_sp_med, = ax_sp.plot([], [], lw=2.0, color="#50a0ff",
+                            label="median (rolling)")
+    poly_sp = ax_sp.fill_between([0, 1], 0, 0, color="#50a0ff",
+                                 alpha=0.15, label="5–95 %")
+    ax_sp.axhspan(95, 100, alpha=0.05, color="#50ff50",
                   label="healthy adult")
     ax_sp.legend(loc="lower right", fontsize=8)
     ax_sp.grid(True, alpha=0.2)
 
-    txt_status = fig.text(0.01, 0.005, "waiting for samples…",
-                          fontsize=9, color="#aaaaaa", family="monospace")
-
-    fig.tight_layout(rect=(0, 0.02, 1, 0.97))
-
     def update(_frame):
+        nonlocal poly_hr, poly_sp
+
         t, ir, red, hr, sp = buffers.snapshot()
         if len(t) < 2:
-            return ln_ir, ln_red, ln_ac, ln_hr, ln_sp, txt_status
+            return ()
 
+        # ── Raw + AC panels ─────────────────────────────────────────
         ln_ir.set_data(t, ir)
         ln_red.set_data(t, red)
 
         ir_demean = ir - ir.mean()
         ln_ac.set_data(t, ir_demean)
 
-        # HR / SpO2 — only show valid (non-zero) values
-        hr_mask = hr > 0
-        ln_hr.set_data(t[hr_mask], hr[hr_mask])
-
-        sp_mask = sp > 0
-        ln_sp.set_data(t[sp_mask], sp[sp_mask])
-
-        # Auto-scale x to the rolling window; y for the two raw panels.
         for ax in (ax_raw, ax_ac, ax_hr, ax_sp):
             ax.set_xlim(t[0], t[-1] + 0.1)
         ir_lo, ir_hi = int(ir.min()), int(ir.max())
@@ -218,21 +301,74 @@ def main() -> int:
         ac_lim = max(2000, int(np.abs(ir_demean).max()) + 500)
         ax_ac.set_ylim(-ac_lim, ac_lim)
 
-        # Status bar
+        # ── HR + SpO2 plots (only valid samples) ────────────────────
+        hr_mask = hr > 0
+        sp_mask = sp > 0
+        ln_hr.set_data(t[hr_mask], hr[hr_mask])
+        ln_sp.set_data(t[sp_mask], sp[sp_mask])
+
+        # Rolling median + percentile band over the *whole* window of
+        # valid samples. fill_between cannot be `set_data`-updated;
+        # we have to remove and recreate the PolyCollection.
+        poly_hr.remove()
+        poly_sp.remove()
+        if hr_mask.any():
+            t_hr = t[hr_mask]
+            v_hr = hr[hr_mask].astype(np.float64)
+            med = float(np.median(v_hr))
+            lo_b = float(np.percentile(v_hr, BAND_LOW_PCT))
+            hi_b = float(np.percentile(v_hr, BAND_HIGH_PCT))
+            ln_hr_med.set_data([t_hr[0], t_hr[-1]], [med, med])
+            poly_hr = ax_hr.fill_between([t_hr[0], t_hr[-1]],
+                                         lo_b, hi_b,
+                                         color="#ff5050", alpha=0.18)
+        else:
+            ln_hr_med.set_data([], [])
+            poly_hr = ax_hr.fill_between([0, 1], 0, 0, color="#ff5050",
+                                         alpha=0.18)
+
+        if sp_mask.any():
+            t_sp = t[sp_mask]
+            v_sp = sp[sp_mask].astype(np.float64)
+            med = float(np.median(v_sp))
+            lo_b = float(np.percentile(v_sp, BAND_LOW_PCT))
+            hi_b = float(np.percentile(v_sp, BAND_HIGH_PCT))
+            ln_sp_med.set_data([t_sp[0], t_sp[-1]], [med, med])
+            poly_sp = ax_sp.fill_between([t_sp[0], t_sp[-1]],
+                                         lo_b, hi_b,
+                                         color="#50a0ff", alpha=0.18)
+        else:
+            ln_sp_med.set_data([], [])
+            poly_sp = ax_sp.fill_between([0, 1], 0, 0, color="#50a0ff",
+                                         alpha=0.18)
+
+        # ── Header strip ────────────────────────────────────────────
         last_hr = int(hr[-1]) if hr_mask.any() else 0
         last_sp = int(sp[-1]) if sp_mask.any() else 0
+        pi = perfusion_index(ir)
+        state, colour = lock_state(hr)
+
+        txt_hr.set_text(f"HR {last_hr:>3}" if last_hr else "HR  --")
+        txt_sp.set_text(f"SpO₂ {last_sp:>2}%" if last_sp else "SpO₂ --%")
+        txt_pi.set_text(f"PI {pi:4.1f}%")
+        txt_pill_bg.set_text(f"  {state}  ")
+        txt_pill_bg.get_bbox_patch().set_facecolor(colour)
+
         alive = buffers.last_alive or {}
         status = (f"samples={len(t):4d}  "
                   f"IR={ir[-1]:6d}  RED={red[-1]:6d}  "
-                  f"HR={last_hr:3d}  SpO2={last_sp:3d}  "
-                  f"alive: edges={alive.get('edges', '-'):>4}  "
-                  f"int1={alive.get('int1', '-')}  "
-                  f"drain={alive.get('drain', '-')}")
+                  f"alive: edges={alive.get('edges', '-'):>5}  "
+                  f"drain={alive.get('drain', '-')}  "
+                  f"ring_hwm={alive.get('ring_hwm', '-')}  "
+                  f"cfg_crc={alive.get('cfg_crc', '-')}  "
+                  f"n={alive.get('cfg_crc_n', '-')}")
         txt_status.set_text(status)
 
-        return ln_ir, ln_red, ln_ac, ln_hr, ln_sp, txt_status
+        return ()
 
     interval_ms = max(1, int(1000.0 / args.fps))
+    # blit=False because the bands (PolyCollection) are recreated each
+    # frame and matplotlib's blit cache can't track that.
     ani = animation.FuncAnimation(fig, update, interval=interval_ms,
                                   blit=False, cache_frame_data=False)
 
