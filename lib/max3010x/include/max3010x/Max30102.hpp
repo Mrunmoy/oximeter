@@ -44,6 +44,21 @@ namespace oxinode::max3010x
             uint32_t i2cErrTotal    = 0;   // I²C transactions that failed
             uint8_t  lastInt1       = 0;   // last-read INTR_STATUS_1
             uint8_t  lastInt2       = 0;   // last-read INTR_STATUS_2
+            // CRC-16/CCITT-FALSE over the seven static config registers
+            // (INTR_ENABLE_{1,2}, FIFO_CONFIG, MODE_CONFIG, SPO2_CONFIG,
+            // LED1_PA, LED2_PA). Updated only by `readbackCfgCrc16()`.
+            // Detects chip-level config drift that PWR_RDY-only
+            // recovery misses — see DESIGN.md follow-up to D-15.
+            //
+            // `cfgCrc` is **only meaningful when `cfgCrcReadbacks > 0`.**
+            // CRC-16 can legitimately evaluate to 0x0000 for some
+            // 7-byte inputs, so the value alone is ambiguous as a
+            // "have we run yet?" indicator. The companion counter
+            // (monotonic, cumulative successful readbacks) gives the
+            // host an unambiguous validity signal: zero → never run,
+            // any non-zero → cfgCrc reflects the most recent readback.
+            uint16_t cfgCrc          = 0;
+            uint32_t cfgCrcReadbacks = 0;
         };
 
         struct Config
@@ -108,6 +123,20 @@ namespace oxinode::max3010x
         // One-shot die temperature read. Blocks for ~30 ms while the
         // chip integrates. Caller should not invoke this from an ISR.
         [[nodiscard]] int readTemperatureC(float& out);
+
+        // Read back the seven static config registers (the ones
+        // configure() writes — INTR_ENABLE_{1,2}, FIFO_CONFIG,
+        // MODE_CONFIG, SPO2_CONFIG, LED1_PA, LED2_PA), CRC them with
+        // CRC-16/CCITT-FALSE and store the result in `outCrc` and
+        // `Stats::cfgCrc`. Returns 0 on success or the negative HAL
+        // error from the first failed I²C read.
+        //
+        // Cost: 3 I²C transactions, 7 bytes of payload total —
+        // ~1 ms at 100 kHz. Intended for a low-cadence health check
+        // (one call every ~10 s); the host can then watch the
+        // `cfg_crc` alive-frame field for drift the PWR_RDY path
+        // didn't catch.
+        [[nodiscard]] int readbackCfgCrc16(uint16_t& outCrc);
 
         // Subscribe an observer. Silently ignored once kMaxObservers is
         // reached — embedded code can't dynamically grow.

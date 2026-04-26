@@ -1,5 +1,7 @@
 #include "max3010x/Max30102.hpp"
 
+#include "max3010x/Framer.hpp"
+
 #include <cstring>
 
 // MAX30102 driver. Datasheet references in comments are to the public
@@ -374,5 +376,51 @@ namespace oxinode::max3010x
         {
             m_observers[i]->onHrSpo2(tMs, hr, spo2);
         }
+    }
+
+    int Max30102::readbackCfgCrc16(uint16_t& outCrc)
+    {
+        // Layout of the CRC input (7 bytes, in register-address order
+        // so the wire encoding is canonical):
+        //   buf[0..1]  INTR_ENABLE_1,  INTR_ENABLE_2
+        //   buf[2..4]  FIFO_CONFIG,    MODE_CONFIG,    SPO2_CONFIG
+        //   buf[5..6]  LED1_PA,        LED2_PA
+        //
+        // The pad register at 0x0B (between SPO2_CONFIG and LED1_PA)
+        // is *deliberately excluded* — the datasheet documents it as
+        // reserved with no defined read value, and including it
+        // would make the CRC chip-revision-dependent without
+        // capturing any configuration we actually drive.
+        uint8_t buf[7] = {};
+        int rc = m_hal.i2cReadReg(m_cfg.devAddr, reg::INTR_ENABLE_1,
+                                  &buf[0], 2);
+        if (rc != 0)
+        {
+            ++m_stats.i2cErrTotal;
+            return rc;
+        }
+        rc = m_hal.i2cReadReg(m_cfg.devAddr, reg::FIFO_CONFIG,
+                              &buf[2], 3);
+        if (rc != 0)
+        {
+            ++m_stats.i2cErrTotal;
+            return rc;
+        }
+        rc = m_hal.i2cReadReg(m_cfg.devAddr, reg::LED1_PA,
+                              &buf[5], 2);
+        if (rc != 0)
+        {
+            ++m_stats.i2cErrTotal;
+            return rc;
+        }
+
+        outCrc = proto::crc16(buf, sizeof(buf));
+        m_stats.cfgCrc = outCrc;
+        // Counter increments only on the success path so the host
+        // can use it as an unambiguous "have we run yet?" signal —
+        // CRC-16 itself can be 0x0000 for some 7-byte inputs, which
+        // would otherwise collide with the default `cfgCrc = 0`.
+        ++m_stats.cfgCrcReadbacks;
+        return 0;
     }
 }
