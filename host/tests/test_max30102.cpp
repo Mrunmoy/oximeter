@@ -141,10 +141,10 @@ namespace
     TEST(Max30102Test, FifoAFullDoesNotPolluteOtherFifoConfigBits)
     {
         // Regression: setting cfg.fifoAFull must not change SMP_AVE
-        // (bits [7:5]) or FIFO_ROLLOVER_EN (bit [4]). Pre-fix code
-        // masked `& 0x0F` which "worked" for in-range u8 but masked
-        // 17 to 1; the enum form has no mask but is still required
-        // to leave the upper bits exactly as encoded by avg/rollover.
+        // (bits [7:5]) or FIFO_ROLLOVER_EN (bit [4]). Encoding is
+        // defensively masked to 4 bits in Max30102::configure so a
+        // hostile caller can't break this even by bypassing the
+        // enum's strong typing.
         FakeI2cHal hal;
         Max30102 dev(hal);
         Max30102::Config cfg{};
@@ -154,6 +154,26 @@ namespace
         ASSERT_EQ(0, dev.configure(cfg));
         // (0b010 << 5) | (1 << 4) | 0x00 = 0x50.
         EXPECT_EQ(0x50, hal.reg(reg::FIFO_CONFIG));
+    }
+
+    TEST(Max30102Test, FifoAFullCastFromOutOfRangeIsMasked)
+    {
+        // Defensive: a caller who explicitly casts an out-of-range u8
+        // to FifoAFull (e.g. from deserialised user config) must NOT
+        // be able to clobber the upper bits of FIFO_CONFIG. The
+        // driver-side `& 0x0F` mask enforces this even though no
+        // named enumerator can produce an out-of-range value.
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        Max30102::Config cfg{};
+        cfg.avg          = oxinode::max3010x::SampleAveraging::AVG_4;
+        cfg.fifoRollover = true;
+        cfg.fifoAFull    =
+            static_cast<oxinode::max3010x::FifoAFull>(0xFF);  // hostile cast
+        ASSERT_EQ(0, dev.configure(cfg));
+        // SMP_AVE | ROLLOVER bits must survive: (0b010 << 5) | (1 << 4) = 0x50.
+        // FIFO_A_FULL bits get the low 4 bits of 0xFF = 0x0F.
+        EXPECT_EQ(0x50 | 0x0F, hal.reg(reg::FIFO_CONFIG));
     }
 
     TEST(Max30102Test, ResetClearsState)
