@@ -199,7 +199,7 @@ namespace oxinode::rp2040
                 "\"chip_ovf\":%lu,\"pwr_rdy\":%lu,\"alc_ovf\":%lu,\"i2c_err\":%lu,"
                 "\"ring_drops\":%lu,\"ring_hwm\":%lu,"
                 "\"dsp_us_max\":%lu,\"dsp_overbudget\":%lu,"
-                "\"fault_flags\":%lu,\"cfg_crc\":%u}\n",
+                "\"fault_flags\":%lu,\"cfg_crc\":%u,\"cfg_crc_n\":%lu}\n",
                 static_cast<unsigned long>(s.tMs),
                 static_cast<unsigned long>(s.edges),
                 static_cast<int>(s.hr),
@@ -220,7 +220,8 @@ namespace oxinode::rp2040
                 static_cast<unsigned long>(s.dspUsMax),
                 static_cast<unsigned long>(s.dspOverbudget),
                 static_cast<unsigned long>(s.faultFlags),
-                static_cast<unsigned>(s.cfgCrc));
+                static_cast<unsigned>(s.cfgCrc),
+                static_cast<unsigned long>(s.cfgCrcReadbacks));
         }
         else
         {

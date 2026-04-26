@@ -46,11 +46,19 @@ namespace oxinode::max3010x
             uint8_t  lastInt2       = 0;   // last-read INTR_STATUS_2
             // CRC-16/CCITT-FALSE over the seven static config registers
             // (INTR_ENABLE_{1,2}, FIFO_CONFIG, MODE_CONFIG, SPO2_CONFIG,
-            // LED1_PA, LED2_PA). Updated only by `readbackCfgCrc16()`;
-            // a value of 0 means the readback hasn't run yet. Detects
-            // chip-level config drift that PWR_RDY-only recovery
-            // misses — see DESIGN.md follow-up to D-15.
-            uint16_t cfgCrc         = 0;
+            // LED1_PA, LED2_PA). Updated only by `readbackCfgCrc16()`.
+            // Detects chip-level config drift that PWR_RDY-only
+            // recovery misses — see DESIGN.md follow-up to D-15.
+            //
+            // `cfgCrc` is **only meaningful when `cfgCrcReadbacks > 0`.**
+            // CRC-16 can legitimately evaluate to 0x0000 for some
+            // 7-byte inputs, so the value alone is ambiguous as a
+            // "have we run yet?" indicator. The companion counter
+            // (monotonic, cumulative successful readbacks) gives the
+            // host an unambiguous validity signal: zero → never run,
+            // any non-zero → cfgCrc reflects the most recent readback.
+            uint16_t cfgCrc          = 0;
+            uint32_t cfgCrcReadbacks = 0;
         };
 
         struct Config

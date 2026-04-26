@@ -128,9 +128,13 @@ namespace
     std::atomic<std::uint32_t> g_drvI2cErr{0};
 
     // CRC-16/CCITT-FALSE over the seven static config registers,
-    // refreshed by core1 every kCfgCrcPeriodMs. 0 = readback hasn't
-    // run yet. See DESIGN.md follow-up to D-15.
+    // refreshed by core1 every kCfgCrcPeriodMs. The companion
+    // `g_drvCfgCrcReadbacks` counter is the validity signal: 0 means
+    // readback hasn't run yet, any non-zero means cfg_crc reflects a
+    // real readback (CRC-16 itself can be 0x0000 for some inputs, so
+    // the value alone is ambiguous). See DESIGN.md follow-up to D-15.
     std::atomic<std::uint16_t> g_drvCfgCrc{0};
+    std::atomic<std::uint32_t> g_drvCfgCrcReadbacks{0};
     constexpr std::uint32_t    kCfgCrcPeriodMs = 10000;
 
     // Per-iteration consumer-side budget. Sample period at 25 Hz =
@@ -361,7 +365,15 @@ namespace
                 std::uint16_t crc = 0;
                 if (s_sensor.readbackCfgCrc16(crc) == 0)
                 {
+                    // Two-step publish: store the CRC first, then
+                    // bump the counter with release semantics so a
+                    // host that sees `cfg_crc_n > 0` is guaranteed to
+                    // see the matching `cfg_crc` value (within the
+                    // monotonic-counter validity window).
                     g_drvCfgCrc.store(crc, std::memory_order_relaxed);
+                    g_drvCfgCrcReadbacks.store(
+                        s_sensor.stats().cfgCrcReadbacks,
+                        std::memory_order_release);
                 }
                 nextCfgCrc = make_timeout_time_ms(kCfgCrcPeriodMs);
             }
@@ -562,7 +574,11 @@ int main()
                 flags |= FAULT_STAGNANT_CONSUMER;
             }
             a.faultFlags = flags;
-            a.cfgCrc     = g_drvCfgCrc.load(std::memory_order_relaxed);
+            // Read the validity counter with acquire so the matching
+            // `cfg_crc` value (paired by core1's release on store) is
+            // guaranteed visible.
+            a.cfgCrcReadbacks = g_drvCfgCrcReadbacks.load(std::memory_order_acquire);
+            a.cfgCrc          = g_drvCfgCrc.load(std::memory_order_relaxed);
 
             link.writeAlive(a);
 

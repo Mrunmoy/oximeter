@@ -410,6 +410,11 @@ namespace oxinode::max3010x
 
         outCrc = proto::crc16(buf, sizeof(buf));
         m_stats.cfgCrc = outCrc;
+        // Counter increments only on the success path so the host
+        // can use it as an unambiguous "have we run yet?" signal —
+        // CRC-16 itself can be 0x0000 for some 7-byte inputs, which
+        // would otherwise collide with the default `cfgCrc = 0`.
+        ++m_stats.cfgCrcReadbacks;
         return 0;
     }
 }

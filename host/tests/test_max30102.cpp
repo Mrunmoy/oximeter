@@ -215,6 +215,33 @@ namespace
         EXPECT_GT(dev.stats().i2cErrTotal, before.i2cErrTotal);
         // cfgCrc is left at whatever it was before — never half-written.
         EXPECT_EQ(before.cfgCrc, dev.stats().cfgCrc);
+        // cfgCrcReadbacks is the validity-flag counter; a failed
+        // readback must NOT bump it (host would otherwise see a
+        // stale value flagged as fresh).
+        EXPECT_EQ(before.cfgCrcReadbacks, dev.stats().cfgCrcReadbacks);
+    }
+
+    TEST(Max30102Test, ReadbackCfgCrcReadbacksCounterIsMonotonic)
+    {
+        // The counter exists as the unambiguous "have we run yet?"
+        // signal — CRC-16 alone can be 0x0000 legitimately, so 0
+        // would otherwise collide with the default sentinel. The
+        // counter must be 0 before the first call and increment by
+        // exactly 1 per successful call.
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+        EXPECT_EQ(0u, dev.stats().cfgCrcReadbacks);
+
+        uint16_t crc = 0;
+        ASSERT_EQ(0, dev.readbackCfgCrc16(crc));
+        EXPECT_EQ(1u, dev.stats().cfgCrcReadbacks);
+
+        ASSERT_EQ(0, dev.readbackCfgCrc16(crc));
+        EXPECT_EQ(2u, dev.stats().cfgCrcReadbacks);
+
+        ASSERT_EQ(0, dev.readbackCfgCrc16(crc));
+        EXPECT_EQ(3u, dev.stats().cfgCrcReadbacks);
     }
 
     TEST(Max30102Test, HandleInterruptNoFlagsSetIsNoOp)
