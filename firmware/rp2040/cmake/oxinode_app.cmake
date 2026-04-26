@@ -72,4 +72,19 @@ function(oxinode_add_app app_name)
     pico_enable_stdio_uart(${app_name} 0)
 
     pico_add_extra_outputs(${app_name})
+
+    # Post-link sanity check: the SPSC sample ring (`g_ring`) lives in
+    # the RP2040 scratch_x SRAM bank for cross-core perf reasons (see
+    # comment on g_ring in main.cpp; DESIGN.md follow-up to D-15).
+    # If a future change drops the `__scratch_x` attribute or another
+    # variable displaces the ring out of bank 4, fail the firmware
+    # build right at the point of regression instead of letting the
+    # perf claim quietly rot.
+    add_custom_command(TARGET ${app_name} POST_BUILD
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/../../scripts/check-scratch-x.sh
+                $<TARGET_FILE:${app_name}>
+        COMMENT "Verifying g_ring placement in scratch_x SRAM bank"
+        VERBATIM
+    )
 endfunction()

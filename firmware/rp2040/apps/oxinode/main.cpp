@@ -104,9 +104,12 @@ namespace
     std::atomic<std::uint8_t> g_int2{0xFF};
 
     // ── Stage B: SPSC ring + producer/consumer counters ──────
-    // 64-slot ring × 12 B/slot = 768 B. Sized for 2× the chip's
-    // 32-deep FIFO worst-case burst plus one period of consumer
-    // jitter. Power of two for mask indexing in SampleRing.
+    // 64 slots × 12 B/slot = 768 B of sample-payload buffer; the
+    // SampleRing object also carries two `std::atomic<uint32_t>`
+    // indices, so total `g_ring` size is ~776 B (compiler may pad).
+    // Sized for 2× the chip's 32-deep FIFO worst-case burst plus
+    // one period of consumer jitter. Power of two for mask indexing
+    // in SampleRing.
     //
     // Placed in `.scratch_x.oxinode` — the dedicated 4 KB RP2040
     // SRAM bank 4 ("scratch X") at 0x20040000. Both cores can read
@@ -115,13 +118,17 @@ namespace
     // ring is on a textbook producer/consumer hot path: core1 writes
     // every sample (25 Hz), core0 reads every sample (25 Hz). Moving
     // it off the striped banks gives both sides a contention-free
-    // path to its memory. The 768 B comfortably fits in the 4 KB
-    // bank with headroom for any future per-core scratch state.
+    // path to its memory. ~776 B comfortably fits in the 4 KB bank
+    // with headroom for any future per-core scratch state.
     //
-    // The placement is verified by the pr/scratch-x-ring host tests
-    // and by inspecting the RP2040 .map file
-    // (build/rp2040/apps/oxinode/oxinode.elf.map): the `g_ring`
-    // symbol address must fall in [0x20040000, 0x20041000).
+    // Placement is enforced at link time by the `__scratch_x` section
+    // attribute below. To verify after a build, inspect the
+    // `build/rp2040/apps/oxinode/oxinode.elf.map` file: the `g_ring`
+    // symbol address must fall in `[0x20040000, 0x20041000)`. There
+    // is no automated host-side check (the ring's address is a
+    // platform property, not visible from `host/tests/`); the
+    // `linker-section-check` step below greps the .map at firmware
+    // build time as a CI guard.
     __scratch_x("oxinode") SampleRing<64> g_ring;
 
     // Saturating max — `compare_exchange_weak` retry loop in the
