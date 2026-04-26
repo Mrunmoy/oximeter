@@ -21,18 +21,26 @@ fields (already median-of-N debounced inside HrDetector — see
 docs/SOFTWARE.md §4 and the D-17 design entry). Perfusion index
 is computed on the host from a rolling window of IR samples.
 
-The HR/SpO2 panels overlay rolling 5-th/95-th percentile bands
-and a median line so an outlier blip is visible *as* a blip
-rather than masquerading as a stable reading. The "LOCKED /
-ACQUIRING" pill is the at-a-glance signal: green LOCKED when
-the latest valid HR has held within a tight band for several
-seconds, orange ACQUIRING otherwise.
+The HR/SpO2 panels overlay a rolling 5–95 % percentile band
+(deliberately wider than IQR's 25–75 % so a single tick excursion
+shows up as a visible blip rather than getting swallowed by the
+band) and a median line so a wandering median catches drift.
+The "LOCKED / ACQUIRING" pill is the at-a-glance signal: green
+LOCKED when the latest valid HR has held within a tight band for
+several seconds, orange ACQUIRING otherwise.
 
 Usage (inside the Nix dev shell):
 
     python3 host/tools/plot_live.py             # uses /dev/ttyACM0
     python3 host/tools/plot_live.py --port /dev/ttyACM1
-    python3 host/tools/plot_live.py --window 600 --fps 10
+    python3 host/tools/plot_live.py --window-sec 300
+
+The default visible history is `--window-sec 120` (~120 s of data
+at the firmware's 25 Hz output rate). Mouse-wheel zoom works on
+any panel: wheel zooms x-axis (time), shift+wheel zooms y-axis,
+ctrl+wheel zooms both. The animation auto-pauses on first zoom
+so the rolling auto-rescale doesn't immediately overwrite your
+view; double-click anywhere to resume live updates.
 
 The script does not write to the device — the firmware is in
 JSON-Lines mode by default (see docs/PROTOCOL.md and SOFTWARE.md §6).
@@ -59,8 +67,10 @@ import serial
 LOCK_MIN_SAMPLES = 25 * 5    # ~5 s of valid HR
 # Maximum |HR - median| over the last LOCK_MIN_SAMPLES samples for LOCKED.
 LOCK_TOLERANCE_BPM = 4
-# IQR band percentiles. 5/95 catches obvious outliers without being so
-# tight that normal rolling jitter looks alarming.
+# Percentile band edges. We deliberately use 5/95 (not the
+# textbook IQR 25/75) so a single 1-Hz HR excursion is wide
+# enough to be visible *outside* the band; an IQR-tight band would
+# swallow it.
 BAND_LOW_PCT = 5.0
 BAND_HIGH_PCT = 95.0
 
@@ -72,11 +82,23 @@ def parse_args() -> argparse.Namespace:
                    help="serial device (default: %(default)s)")
     p.add_argument("--baud", type=int, default=115200,
                    help="ignored on USB-CDC but accepted for symmetry (default: %(default)s)")
-    p.add_argument("--window", type=int, default=500,
-                   help="number of samples to keep in the rolling view (default: %(default)s)")
+    p.add_argument("--window-sec", type=float, default=120.0,
+                   help="visible history in seconds; converted to samples "
+                        "internally at the firmware's 25 Hz rate "
+                        "(default: %(default)s s)")
+    p.add_argument("--window", type=int, default=None,
+                   help="number of samples to keep — overrides --window-sec "
+                        "if given. Useful only for testing.")
     p.add_argument("--fps", type=float, default=15.0,
                    help="animation frame rate (default: %(default)s)")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.window is None:
+        # 25 Hz is the firmware's post-AVG_4 output rate; see
+        # HrDetector::kFs. The buffer is sized in samples at that
+        # rate so the user can think in time units. Round to a
+        # tidy integer count.
+        args.window = max(50, int(round(args.window_sec * 25.0)))
+    return args
 
 
 # ── shared rolling buffers ─────────────────────────────────────────────────
@@ -151,11 +173,15 @@ def reader_loop(port: str, baud: int, buffers: Buffers,
 
 
 # ── derived signals ────────────────────────────────────────────────────────
-def perfusion_index(ir: np.ndarray) -> float:
+def perfusion_index(ir: np.ndarray, min_samples: int) -> float:
     """Maxim AN6845 §"Perfusion Index": PI = (AC_pp / DC) × 100. We use
     peak-to-peak over the rolling window for AC, and the window mean
-    for DC. Returns 0.0 if the window is too short or DC is zero."""
-    if ir.size < 25 or ir.mean() <= 0:
+    for DC. Returns 0.0 until the rolling window has at least
+    `min_samples` entries — early calls compute on a partial window
+    where AC peak-to-peak is dominated by signal-onset transients
+    rather than steady-state pulse amplitude, which produces a
+    nonsense PI in the 100 %+ range that misleads the reader."""
+    if ir.size < min_samples or ir.mean() <= 0:
         return 0.0
     ac_pp = float(ir.max() - ir.min())
     return (ac_pp / float(ir.mean())) * 100.0
@@ -246,7 +272,7 @@ def main() -> int:
 
     # ── Top-right: HR + median + IQR band ─────────────────────────────
     ax_hr = fig.add_subplot(gs[1, 1])
-    ax_hr.set_title("Heart rate (BPM) — sample, median, 5-95 % band")
+    ax_hr.set_title("Heart rate (BPM) — sample, median, 5–95 % band")
     ax_hr.set_ylabel("BPM")
     ax_hr.set_ylim(30, 180)
     ln_hr,     = ax_hr.plot([], [], lw=1.2, color="#ff8080",
@@ -262,7 +288,7 @@ def main() -> int:
 
     # ── Bottom-right: SpO2 + median + IQR band ────────────────────────
     ax_sp = fig.add_subplot(gs[2, 1])
-    ax_sp.set_title("SpO₂ (%) — sample, median, 5-95 % band")
+    ax_sp.set_title("SpO₂ (%) — sample, median, 5–95 % band")
     ax_sp.set_xlabel("time (s)")
     ax_sp.set_ylabel("%")
     ax_sp.set_ylim(80, 100)
@@ -343,9 +369,17 @@ def main() -> int:
                                          alpha=0.18)
 
         # ── Header strip ────────────────────────────────────────────
-        last_hr = int(hr[-1]) if hr_mask.any() else 0
-        last_sp = int(sp[-1]) if sp_mask.any() else 0
-        pi = perfusion_index(ir)
+        # Use the last *valid* sample, not the last raw entry —
+        # otherwise a transient -1 from the firmware (HR/SpO2 not
+        # yet computed on the producer side) flickers the big
+        # readouts to "HR -1" between valid frames.
+        last_hr = int(hr[hr_mask][-1]) if hr_mask.any() else 0
+        last_sp = int(sp[sp_mask][-1]) if sp_mask.any() else 0
+        # Don't compute PI on a partial rolling window; the AC
+        # peak-to-peak over a few startup samples gives a nonsense
+        # value in the 100 %+ range, which obscures the otherwise
+        # informative early reading. Wait until the window is full.
+        pi = perfusion_index(ir, min_samples=buffers.capacity)
         state, colour = lock_state(hr)
 
         txt_hr.set_text(f"HR {last_hr:>3}" if last_hr else "HR  --")
@@ -365,6 +399,66 @@ def main() -> int:
         txt_status.set_text(status)
 
         return ()
+
+    # ── Mouse-wheel zoom ──────────────────────────────────────────────
+    # Matplotlib doesn't ship with wheel-zoom; the toolbar gives you
+    # rectangle-zoom and pan, but no panel-local wheel zoom. The
+    # waveform panels in particular benefit from being able to scrub
+    # in on a single beat without losing the long-window context, so
+    # we wire up a scroll handler.
+    #
+    # Behaviour: scroll up = zoom in, scroll down = zoom out, around
+    # the cursor's data coordinate. Modifier keys select the axis
+    # affected:
+    #     no modifier  → x-axis only (time)
+    #     shift+wheel  → y-axis only (counts / BPM / %)
+    #     ctrl+wheel   → both
+    # Auto-scaling in the FuncAnimation overrides x-zoom on every
+    # frame, so wheel zoom on x is most useful when paused — we
+    # therefore auto-pause the animation on the first wheel event
+    # and resume on a double-click anywhere in the figure.
+    ZOOM_FACTOR = 1.25
+
+    state = {"paused": False}
+
+    def _scale(lo: float, hi: float, focus: float, factor: float) -> tuple[float, float]:
+        return (focus - (focus - lo) * factor,
+                focus + (hi - focus) * factor)
+
+    def on_scroll(event):
+        ax = event.inaxes
+        if ax is None or event.xdata is None or event.ydata is None:
+            return
+        # Only the four data panels — leave the header alone.
+        if ax not in (ax_raw, ax_ac, ax_hr, ax_sp):
+            return
+        factor = (1.0 / ZOOM_FACTOR) if event.button == "up" else ZOOM_FACTOR
+        key = (event.key or "").lower()
+        zoom_x = "shift" not in key  # default & ctrl: yes; shift-only: no
+        zoom_y = ("shift" in key) or ("ctrl" in key) or (key == "")
+        if zoom_x:
+            x0, x1 = ax.get_xlim()
+            ax.set_xlim(*_scale(x0, x1, event.xdata, factor))
+        if zoom_y:
+            y0, y1 = ax.get_ylim()
+            ax.set_ylim(*_scale(y0, y1, event.ydata, factor))
+        # Pause animation on first zoom so the auto-rescale doesn't
+        # immediately overwrite the user's view. Double-click resumes.
+        if not state["paused"]:
+            ani.event_source.stop()
+            state["paused"] = True
+            txt_status.set_text(
+                "PAUSED (double-click to resume) — wheel = zoom x, "
+                "shift+wheel = y, ctrl+wheel = both")
+        fig.canvas.draw_idle()
+
+    def on_dblclick(event):
+        if event.dblclick and state["paused"]:
+            ani.event_source.start()
+            state["paused"] = False
+
+    fig.canvas.mpl_connect("scroll_event", on_scroll)
+    fig.canvas.mpl_connect("button_press_event", on_dblclick)
 
     interval_ms = max(1, int(1000.0 / args.fps))
     # blit=False because the bands (PolyCollection) are recreated each
