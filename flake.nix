@@ -91,10 +91,18 @@
             echo "  cmake             : $(cmake --version | head -1)"
             echo "  PICO_SDK_PATH     : $PICO_SDK_PATH"
             echo ""
-            echo " Build :  ./scripts/build.sh {rp2040 | host-tests | esp32s3}"
-            echo " Flash :  ./scripts/flash.sh rp2040"
-            echo " ESP32 :  bring up via firmware/esp32s3/env.sh + idf.py"
-            echo "          (or ./docker/docker-build.sh esp32s3)"
+            echo " Build   :  ./scripts/build.sh   {rp2040 | host-tests | esp32s3 | all}"
+            echo " Flash   :  ./scripts/flash.sh   {rp2040 | esp32s3 [/dev/ttyACM0]}"
+            echo " Monitor :  ./scripts/monitor.sh                  # picocom 115200"
+            echo " Burn-in :  ./scripts/burn-in.sh                  # 60 s soak + assert counters clean"
+            echo "             DEVICE=/dev/ttyACM1 DURATION=120 ./scripts/burn-in.sh"
+            echo " Live    :  python3 host/tools/plot_live.py       # 4-panel matplotlib visualizer"
+            echo "             python3 host/tools/plot_live.py --port /dev/ttyACM1 --window 600"
+            echo " Tests   :  ctest --test-dir build/host --output-on-failure"
+            echo "             build/host/oxinode_tests --gtest_filter='Max30102Test.*'"
+            echo " ESP32   :  bring up via firmware/esp32s3/env.sh + idf.py"
+            echo "             (or ./docker/docker-build.sh esp32s3)"
+            echo " Docker  :  ./docker/docker-build.sh {rp2040 | esp32s3}   # alt build path"
           '';
         };
       });
