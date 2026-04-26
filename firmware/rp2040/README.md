@@ -5,26 +5,29 @@ MAX30102 breakout wired to I²C0 + GP6 INT. Built on pico-sdk 2.2.
 
 ## Status
 
-**First light** as of commit `da1dd3c` (2026-04-25). Boots, enumerates
-as USB-CDC `2e8a:000a Raspberry Pi Pico` at `/dev/ttyACM0`, streams
-JSON-Lines, reads SpO2 = 98 % off a finger placed on the optical
-window. See [`/docs/DESIGN.md`](../../docs/DESIGN.md) entries D-11
-(USB descriptor collision) and D-12 (hybrid IRQ + polled drain) for
-the bring-up gotchas.
+**HR + SpO2 + OLED dashboard all working** as of 2026-04-26.
+Boots, enumerates as USB-CDC `2e8a:000a Raspberry Pi Pico` at
+`/dev/ttyACM0`, streams JSON-Lines, drives an SSD1306 OLED on I²C1,
+and locks onto a real cardiac signal (HR = 78 BPM, SpO2 = 97-98 %
+off a finger). 60 s burn-in
+(`./scripts/burn-in.sh`) passes with all observability counters
+clean and a 1:1 IRQ-to-sample ratio (5777 edges = 5777 samples
+drained = 5777 consumed over 230 s, no drops). See
+[`/docs/DESIGN.md`](../../docs/DESIGN.md):
+- D-11 — `pico_stdio_usb` USB descriptor collision (bring-up gotcha)
+- D-12 — hybrid IRQ + 50 ms polled FIFO drain *(superseded)*
+- D-13 — Maxim `find_peaks` HR algorithm + AN6845 calibrated SpO2
+  quadratic + UG6409 chip-config alignment
+- D-14 — pure IRQ-driven drain (no polled fallback)
+- D-15 — producer/consumer split, observability counters, watchdog
+- **D-16 — GPIO IRQ trampoline must run on core0**, not core1 (the
+  fix that made D-14's pure-IRQ design actually work on hardware)
+- D-17 — median-of-3 output filter on HR (squashes 1-cycle excursions)
+- D-18 — SSD1306 OLED dashboard on I²C1 (GP14/GP15)
 
 ## Open issues
 
-1. **`HrDetector` does not lock onto a real pulse.** With `cfg.avg
-   = AVG_4` the HR field stuck at 31 BPM (envelope settling-time
-   mismatched to physical time at 25 Hz output rate). With
-   `cfg.avg = AVG_1` (current setting, 100 Hz output) the HR stays
-   at -1 (signal too noisy for the adaptive envelope to cross
-   threshold cleanly). DSP fix lives in
-   `lib/max3010x/src/HrDetector.cpp` — needs (a) 0.5–4 Hz
-   band-pass pre-filter, (b) faster envelope α at startup,
-   (c) tighter peak-fraction. SpO2 path is unaffected (uses
-   AC RMS / DC mean over 1 s window, no peak detection).
-2. **Host control parser disabled.** `MODE BIN\n` / `MODE JSON\n`
+1. **Host control parser disabled.** `MODE BIN\n` / `MODE JSON\n`
    are not parsed in this build — `pico_stdio_usb` owns the USB
    descriptor and the `tud_cdc_n_*` declarations are gated behind
    its private `tusb_config.h`. Forcing `OXINODE_HAVE_TINYUSB=0`
@@ -37,13 +40,15 @@ the bring-up gotchas.
 See `include/board/pins.hpp` (single source of truth) and
 `/docs/HARDWARE.md` (canonical wiring with photos).
 
-| Signal | RP2040-Zero pad | MAX30102 |
-|--------|-----------------|----------|
-| 3V3 OUT | 3V3            | VIN      |
-| GND     | GND            | GND      |
-| SDA     | GP4 (I²C0)     | SDA      |
-| SCL     | GP5 (I²C0)     | SCL      |
-| INT     | GP6            | INT      |
+| Signal | RP2040-Zero pad | Peripheral |
+|--------|-----------------|------------|
+| 3V3 OUT | 3V3            | MAX30102 VIN, OLED VDD |
+| GND     | GND            | both GNDs |
+| SDA     | GP4 (I²C0)     | MAX30102 SDA |
+| SCL     | GP5 (I²C0)     | MAX30102 SCL |
+| INT     | GP6            | MAX30102 INT (open-drain, internal pull-up) |
+| OLED SDA | GP14 (I²C1)   | SSD1306 SDA (400 kHz) |
+| OLED SCL | GP15 (I²C1)   | SSD1306 SCL (400 kHz) |
 
 ## Build
 
@@ -86,19 +91,25 @@ picocom -b 115200 /dev/ttyACM0
 ./scripts/monitor.sh
 ```
 
-Sample stream (real capture, finger on sensor):
+Sample stream (real capture, finger on sensor, post D-13):
 
 ```jsonl
-{"t":22708,"ir":111705,"red":109813,"hr":null,"spo2":98}
-{"t":22708,"ir":111546,"red":109744,"hr":null,"spo2":98}
-{"t":22770,"ir":111377,"red":109653,"hr":null,"spo2":98}
-{"t":22770,"alive":1,"edges":747,"hr":-1,"spo2":98,"probe":0,"cfg":0,"int1":0,"int2":0,"drain":6}
+{"t":23593,"ir":237598,"red":205984,"hr":78,"spo2":97}
+{"t":23648,"ir":235406,"red":205169,"hr":78,"spo2":97}
+{"t":23701,"ir":234622,"red":204885,"hr":78,"spo2":97}
+{"t":23756,"ir":234802,"red":204971,"hr":78,"spo2":97}
+{"t":23810,"ir":235893,"red":205384,"hr":78,"spo2":97}
+{"t":23918,"ir":236652,"red":205688,"hr":78,"spo2":97}
+{"t":24530,"alive":1,"edges":479,"hr":78,"spo2":97,"probe":0,"cfg":0,"int1":0,"int2":0,"drain":2}
 ```
 
 The diagnostic-rich `alive` frame (added in commit `11a3b15`) carries
 `probe` / `cfg` return codes and live `INTR_STATUS_{1,2}` so a single
 line tells you whether the I²C path is healthy and whether the chip
-is firing interrupts.
+is firing interrupts. With the post-D-13 chip config (SR=100 Hz,
+SMP_AVE=4 → 25 Hz output rate) you should see roughly 25 sample
+lines per second between alive frames; `edges` should advance by
+~25/s; `drain` is a small positive number per pump cycle.
 
 Mode-switch commands (`MODE BIN\n` / `MODE JSON\n`) are not parsed in
 the current firmware — see "Open issues" above. The wire format

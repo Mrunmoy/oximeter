@@ -184,36 +184,55 @@ namespace oxinode::rp2040
         }
     }
 
-    void UsbCdcLink::writeAlive(std::uint32_t tMs, std::uint32_t edges,
-                                std::int16_t hr, std::int16_t spo2,
-                                std::int8_t probeRc, std::int8_t configureRc,
-                                std::uint8_t int1, std::uint8_t int2,
-                                std::int32_t lastDrainRc)
+    void UsbCdcLink::writeAlive(const AliveStats& s)
     {
         if (m_mode == Mode::Json)
         {
+            // The line is long but every field has paid for its
+            // place — host-side `scripts/burn-in.sh` reads this
+            // verbatim. Keep field names short to minimise USB
+            // bandwidth.
             std::printf(
                 "{\"t\":%lu,\"alive\":1,\"edges\":%lu,\"hr\":%d,\"spo2\":%d,"
-                "\"probe\":%d,\"cfg\":%d,\"int1\":%u,\"int2\":%u,\"drain\":%ld}\n",
-                static_cast<unsigned long>(tMs),
-                static_cast<unsigned long>(edges),
-                static_cast<int>(hr),
-                static_cast<int>(spo2),
-                static_cast<int>(probeRc),
-                static_cast<int>(configureRc),
-                static_cast<unsigned>(int1),
-                static_cast<unsigned>(int2),
-                static_cast<long>(lastDrainRc));
+                "\"probe\":%d,\"cfg\":%d,\"int1\":%u,\"int2\":%u,\"drain\":%ld,"
+                "\"smpl_d\":%lu,\"smpl_c\":%lu,"
+                "\"chip_ovf\":%lu,\"pwr_rdy\":%lu,\"alc_ovf\":%lu,\"i2c_err\":%lu,"
+                "\"ring_drops\":%lu,\"ring_hwm\":%lu,"
+                "\"dsp_us_max\":%lu,\"dsp_overbudget\":%lu,"
+                "\"fault_flags\":%lu}\n",
+                static_cast<unsigned long>(s.tMs),
+                static_cast<unsigned long>(s.edges),
+                static_cast<int>(s.hr),
+                static_cast<int>(s.spo2),
+                static_cast<int>(s.probeRc),
+                static_cast<int>(s.configureRc),
+                static_cast<unsigned>(s.int1),
+                static_cast<unsigned>(s.int2),
+                static_cast<long>(s.lastDrainRc),
+                static_cast<unsigned long>(s.samplesDrained),
+                static_cast<unsigned long>(s.samplesConsumed),
+                static_cast<unsigned long>(s.chipOvf),
+                static_cast<unsigned long>(s.pwrRdy),
+                static_cast<unsigned long>(s.alcOvf),
+                static_cast<unsigned long>(s.i2cErr),
+                static_cast<unsigned long>(s.ringDrops),
+                static_cast<unsigned long>(s.ringHwm),
+                static_cast<unsigned long>(s.dspUsMax),
+                static_cast<unsigned long>(s.dspOverbudget),
+                static_cast<unsigned long>(s.faultFlags));
         }
         else
         {
+            // Bin mode keeps the original v1 layout — the extended
+            // fields land here only when the binary protocol is
+            // re-enabled (D-11) and a schema bump is published.
             std::uint8_t buf[1 + 1 + 4 + 4 + 2 + 2];
             buf[0] = 0x03;       // ALIVE
             buf[1] = 0x00;
-            std::memcpy(&buf[2], &tMs, 4);
-            std::memcpy(&buf[6], &edges, 4);
-            std::memcpy(&buf[10], &hr, 2);
-            std::memcpy(&buf[12], &spo2, 2);
+            std::memcpy(&buf[2],  &s.tMs,   4);
+            std::memcpy(&buf[6],  &s.edges, 4);
+            std::memcpy(&buf[10], &s.hr,    2);
+            std::memcpy(&buf[12], &s.spo2,  2);
             writeRaw(buf, sizeof(buf));
         }
     }

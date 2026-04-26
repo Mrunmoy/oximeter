@@ -453,7 +453,12 @@ single-line removal of the `tinyusb_device tinyusb_board` link clause.
 
 ---
 
-## D-12 — Hybrid IRQ + 50 ms polled FIFO drain
+## D-12 — Hybrid IRQ + 50 ms polled FIFO drain  *(superseded by [D-14](#d-14--switched-back-to-irq-only-drain-after-bring-up))*
+
+> **Status as of 2026-04-26:** the polled fallback was a bring-up
+> safety net. With the chip's IRQ wiring verified and PPG_RDY enabled
+> (so INT fires every output sample, ~25 Hz), the polled wake was
+> redundant. Drain is now pure-IRQ. See D-14 for the rationale.
 
 **Context.** The MAX30102 INT line is open-drain active-low. The
 canonical embedded path is to wire it to a GPIO, arm a falling-edge
@@ -521,3 +526,524 @@ working, but until we had alive frames carrying live `edges` /
 `int1` / `probe` / `cfg` values we couldn't tell that from a wiring
 fault. Hybrid-by-default keeps the next bring-up's diagnostic loop
 short.
+
+---
+
+## D-13 — Replaced homegrown HR detector with Maxim's `algorithm.cpp` port; SpO2 uses AN6845 calibrated quadratic
+
+**Context.** Initial bring-up shipped a streaming `HrDetector` of my
+own design — a single-pole DC remover, 4-tap MA, asymmetric envelope
+tracker (α=0.999/0.001), threshold-crossing peak detector. On real
+hardware the HR field stuck at `-1` (signal too noisy at AVG_1) or
+clamped to `31` BPM (envelope settling time mismatched the post-AVG_4
+sample rate). SpO2 worked fine. After the user supplied four extra
+Maxim docs (UG6409 — *Recommended Configurations and Operating
+Profiles for MAX30101/MAX30102 EV Kits*; AN6845 — *Guidelines for
+SpO2 Measurement*; AN6410 — *SNR as a Quantitative Measure*; AN6433
+— *Penetration Depth vs. Wavelength*), it became clear the homegrown
+detector was solving the wrong problem in the wrong way.
+
+**Decision.** Rewrite both DSP paths to follow the published Maxim
+references exactly:
+
+1. **HR detector.** Direct port of the MAXREFDES117# reference
+   (`algorithm.cpp::maxim_heart_rate_and_oxygen_saturation` +
+   `maxim_find_peaks`), described step-by-step in UG6409 §"Heart-Rate
+   Post-Processing" (p.29-30). Buffer 100 samples (4 s @ 25 Hz) —
+   subtract mean — invert (so peak-finder finds systolic upstrokes,
+   which are *valleys* in the IR-ADC trace because more blood absorbs
+   more light) — 4-tap moving-average smoother — `find_peaks` above
+   a height floor of 30 ADC counts, separated by ≥ 4 samples (≈ 0.16 s
+   = 375 BPM ceiling) — BPM = (Fs · 60) / mean_peak_interval. Recompute
+   once per second; cache the BPM between recomputes.
+2. **SpO2 quadratic.** Replaced the linear `110 − 25R` placeholder
+   with AN6845 Table 1 (p.13) — Maxim's published calibrated
+   coefficients for the MAX30101 / MAX30102 with no optical shield:
+   `SpO2 = 1.5958422·R² − 34.6596622·R + 112.6898759`. Same R from
+   the rolling-window AC RMS / DC mean computation; only the curve
+   changes.
+3. **Chip config alignment.** UG6409 §"Recommended Practices"
+   (p.26-27) calls for `SMP_AVE = 4` so the chip outputs 25 Hz
+   denoised samples — the rate the reference HR algorithm assumes.
+   We had `AVG_1` because earlier I'd tried to dodge the envelope-
+   tracker mistuning by feeding it 100 Hz; the real fix is the
+   right algorithm at the right rate. AN6845 step 8 (p.9) wants DC
+   ≥ 150 K counts on a finger device; `irLedPa = redLedPa = 0x3F`
+   (~12.5 mA) lands DC at ≈240 K (IR) / ≈207 K (RED).
+
+**Why.** UG6409 page 9 — "An SpO2 algorithm used with the MAX30102
+output signal can compensate for the associated SpO2 error" — and
+the LED-Driver paragraph below it — "to allow the algorithm to
+optimize SpO2 and HR accuracy" — make it explicit: the datasheet
+hands the DSP off to the application code, and the algorithm Maxim
+endorses is the one shipped with the MAXREFDES117# reference design.
+That is the same code SparkFun bundles in their MAX3010x library
+(`spo2_algorithm.cpp` is a verbatim copy with the original
+copyright header). Millions of users get plausible HR readings out
+of MAX30102 modules because they are running this exact algorithm
+with the exact chip configuration UG6409 prescribes.
+
+**Tradeoff.** We give up the streaming nature of the old detector —
+BPM only updates once per second now, and the first reading is
+delayed by the 4-second buffer fill. In exchange:
+
+- HR locks to a stable resting BPM on a fingertip (verified on
+  hardware: 78 BPM steady, see `git log` after this commit).
+- The DSP is bit-faithful to a reference that's been validated
+  against thousands of users in the SparkFun ecosystem.
+- All-integer math — RP2040 Cortex-M0+ has no FPU, so the per-sample
+  float pipeline of the old detector was secretly software-emulated
+  every sample at 25/100 Hz.
+
+**Empirical surprise — UG6409's "¼ to ¾ FS" rule conflicts with
+HR-detector SNR.** UG6409 p.19 wants DC + AC sitting between ¼ FS
+(65 K) and ¾ FS (197 K) for SpO2 calibration accuracy. Our `0x3F`
+LED PA puts IR DC at 240 K = 91 % FS, comfortably above the
+doctrinal ceiling. I tried `0x30` (~9.6 mA), which landed DC at
+183 K (70 % FS) — squarely in the recommended window. **HR detection
+got worse**: scattered across 11 unique values 48–166 BPM with no
+clear lock, vs. clean 78 BPM at `0x3F`. The smaller AC swing (7.8 K
+vs 12.5 K p-p) starves the find_peaks SNR. UG6409's headroom rule is
+intended for production wearables that must work across diverse skin
+tones and motion conditions; for benchtop bring-up with a single
+calm finger, more current is unambiguously better. We never saturate
+(IR peak 243 K vs FS 262 K, 7 % margin), so the doctrine doesn't
+bind. **Documented `0x3F` as the verified-good value with a long
+comment in `Max30102::Config` so a future cleanup pass doesn't
+revert it back to the doctrinal target.**
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| Keep homegrown envelope tracker, retune α. | Three tuning knobs (α-up, α-down, peak-fraction) interacting non-obviously. Even after Maxim docs landed, no principled way to set them. |
+| Port SparkFun's PBA (`checkForBeat`, `heartRate.cpp`). | Same author, same Maxim copyright, but it's the *streaming* zero-crossing variant. UG6409 publishes the buffered `find_peaks` variant. We chose the one Maxim documents directly. |
+| Port `algorithm_by_RF.cpp` (autocorrelation). | More robust to motion artifacts. Worth doing later if the simpler port underperforms in the field, but it's not what the docs walk through. Leave as a v2 candidate. |
+| Tune `HrDetector` constants to the new 25 Hz rate, keep envelope approach. | Even with better tuning, a streaming envelope-tracker fundamentally cannot match the SNR of a 4-second buffered batch. Moot. |
+
+**Test coverage.** Host gtest grew from 27 → 30 cases:
+`HrDetectorTest.SlowSignal40Bpm` (regression for the bradycardia case
+the old detector failed on), `BufferNotFullGivesZero` (no false
+publication during fill), `HighFrequencyNoiseRejected` (8 Hz noise
+on a 60 BPM fundamental still locks). SpO2 tests' expected values
+shifted to match AN6845's quadratic (R=0.4 → 99 %, R=0.8 → 86 %,
+R=1.4 → 67 %).
+
+---
+
+## D-14 — Switched back to IRQ-only drain after bring-up
+
+**Context.** [D-12](#d-12--hybrid-irq--50-ms-polled-fifo-drain)
+shipped the bring-up firmware with a hybrid IRQ + 50 ms polled FIFO
+drain. The polled half was insurance: if the GPIO IRQ wiring or the
+chip's INT configuration was wrong, the data path would still
+advance every 50 ms and the alive frame would surface the diagnostic.
+That insurance has done its job — first light, the algorithm
+correctness work, and the post-D-13 validation all confirmed the IRQ
+path is healthy. The `edges` counter advances ~20–25 times per
+second (PPG_RDY at 25 Hz output rate plus occasional A_FULL races),
+which means the IRQ path is doing all the real work and the polled
+wake almost always finds nothing pending.
+
+**Decision.** Drop the 50 ms polled fallback. core1's drain loop now
+calls `PicoIntPin::waitForInterrupt()` (blocking
+`multicore_fifo_pop_blocking`) and runs `handleInterrupt()` only on
+real wake tokens from the GP6 ISR. One-line change in `main.cpp`:
+
+```cpp
+// before: bounded wait
+(void)PicoIntPin::waitForInterruptOrTimeout(50);
+
+// after: blocking wait, IRQ-only
+(void)PicoIntPin::waitForInterrupt();
+```
+
+**Why.** Three reasons:
+
+1. **PPG_RDY is on.** `Max30102::configure()` enables both `A_FULL`
+   and `PPG_RDY` in `INTR_ENABLE_1`. PPG_RDY fires once per output
+   sample (25 Hz at SR=100 / AVG=4), so the IRQ rate already matches
+   the sample rate. The 50 ms polled wake was firing at ~20 Hz and
+   doing zero work in the steady state — pure overhead.
+2. **The diagnostic surface is intact without it.** The alive frame
+   still publishes `edges`, `int1`, `int2`, `probe`, `cfg`, `drain`
+   on a 1 Hz timer driven from core0. A wedged sensor manifests as
+   `edges` flatlining or `int1` stuck non-zero — same diagnosis path
+   as before, just slower.
+3. **Cleaner semantics.** With the polled wake gone, every entry to
+   `handleInterrupt()` corresponds to a real chip interrupt. The
+   "early-out on no FIFO event" branch (`Max30102.cpp:185`) becomes
+   the no-op path for races (chip cleared the latch between ISR
+   posting the wake and core1 reading INTR_STATUS_1) rather than the
+   normal-case path — which is what the original Maxim reference code
+   assumes.
+
+**Tradeoff.** A wiring fault that breaks INT *after* a confirmed
+healthy boot now hangs core1 forever instead of being papered over by
+the 50 ms wake. core0's alive frame still streams, the host still sees
+"edges flat / drain not advancing" within 1 second, but the `t`
+field of sample lines stops advancing because no samples are being
+drained. This is the *correct* failure mode — silent fall-back to
+polling masked the real problem on the bench.
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| Keep the hybrid as a `OXINODE_DRAIN_HYBRID` compile-time toggle. | YAGNI. If we ever need it back during another bring-up, the change is one line in `main.cpp` and a `git revert`. The toggle would just decay. |
+| Keep polled wake but extend timeout to 1 s (purely a watchdog). | Still fires once per sample at 25 Hz — pointless. The watchdog is core0's alive frame. |
+| Disable PPG_RDY, leave A_FULL only. | Burns the IRQ rate down to ~A_FULL frequency. No correctness benefit; trades IRQ overhead for FIFO depth utilisation. The chip handles 25 IRQs/sec without any fuss. |
+
+**Follow-up: known footgun in `Config::fifoAlmostFullThreshold`.**
+While reading the code to answer "when does INT fire", I noticed
+`Max30102.cpp:97` masks the threshold value with `& 0x0F`:
+
+```cpp
+static_cast<uint8_t>(cfg.fifoAlmostFullThreshold & 0x0F);
+```
+
+The default `Config::fifoAlmostFullThreshold = 17` → masked to 1.
+Per the MAX30102 datasheet rev 1, FIFO_A_FULL[3:0] = 1 means
+"interrupt fires when 1 free space remains" = 31 unread entries.
+UG6409 page 27 reads the same field as "interrupt fires when there
+is 1 sample in FIFO" — the docs disagree. Either way our intended
+semantics ("fire when ~17 entries are unread") is not what the chip
+sees. **It does not matter today** because PPG_RDY is enabled and
+fires every sample anyway, so A_FULL essentially never gets a chance
+to assert before INTR_STATUS_1 is cleared. **It will matter** if a
+future change disables PPG_RDY for power-savings or batches reads.
+Tracked as a follow-up; cleanest fix is to change the field type to
+something self-documenting (`enum class FifoAFull : uint8_t { ... }`)
+and assert the value fits in 4 bits.
+
+---
+
+## D-15 — Producer/consumer split, observability counters, and a deliberately-narrow watchdog
+
+**Context.** [D-14](#d-14--switched-back-to-irq-only-drain-after-bring-up)
+left the firmware with a clean IRQ-driven drain, but the work *after*
+the drain — DSP, JSON encoding, USB enqueue, and observer fan-out —
+all ran in the same core1 context. Three concrete issues followed:
+
+1. **Back-pressure leakage.** A slow USB host (pico CDC TX queue full)
+   blocked `tud_cdc_write` inside the drain path. Drain stalled until
+   USB drained. The chip's FIFO would silently overflow if the stall
+   was long enough, and we had no way to count it.
+2. **Inattentive ISR dispatch.** `Max30102::handleInterrupt()` only
+   checked `(A_FULL | PPG_RDY)`. **PWR_RDY was silently ignored** —
+   if the chip browned out (flaky USB cable), it came back up
+   un-configured and the firmware kept reading garbage. **ALC_OVF
+   was silently ignored** — bright ambient light degraded samples
+   with no fingerprint. The `OVF_COUNTER` was read but never
+   surfaced.
+3. **No "tomorrow someone breaks it" alarm.** A future contributor
+   could regress the consumer-side latency by a factor of 5 and the
+   firmware would back-pressure silently.
+
+**Decision.** Land four small commits as one logical change:
+
+- **Stage A — Smart ISR dispatch + PWR_RDY recovery.**
+  `Max30102::handleInterrupt()` now reads `INTR_STATUS_1` and
+  dispatches per-flag: PWR_RDY runs `configure(m_cfg)` to re-init
+  after brownout (which itself resets DSP state), ALC_OVF
+  increments a counter and continues, A_FULL/PPG_RDY drains as
+  before. `OVF_COUNTER` accumulates monotonically into
+  `Stats::chipOvfTotal`. The driver exposes `Max30102::Stats stats()`
+  with `samplesDrained / chipOvfTotal / pwrRdyEvents / alcOvfEvents
+  / i2cErrTotal / lastInt1 / lastInt2`. **Counters are monotonic
+  u32; never reset on read** — host computes deltas. (See the round-
+  table in conversation; the reliability expert was firm on this.)
+  Seven new gtests cover each dispatch path.
+
+- **Stage B — SPSC ring + producer/consumer split.**
+  Added `firmware/rp2040/apps/oxinode/inc/SampleRing.hpp`: a
+  64-slot lock-free single-producer / single-consumer ring
+  (12 B/sample × 64 = 768 B). Power-of-2 capacity with bit-mask
+  indexing; head/tail are monotonically-increasing `u32` so
+  modular subtraction gives depth without empty/full ambiguity.
+  Acquire/release on the indices — no mutex, no `__disable_irq`,
+  no critical section. `RingPushObserver` (core1) replaces the
+  old `LinkObserver`: it pushes decoded samples into the ring and
+  bumps `g_ringDrops` on full. core0's main loop drains the ring
+  per iteration, formats one JSON line per sample, and enqueues to
+  TinyUSB. **A slow USB host can no longer back-pressure the drain
+  path** — at worst the ring fills, drops are counted, surfaced.
+
+- **Stage C — Extended alive frame + soft liveness.**
+  `UsbCdcLink::writeAlive` takes a struct (`AliveStats`) carrying
+  every counter from Stages A + B plus a `fault_flags` u32 bitmap
+  (`FaultFlags.hpp`). core0 carries one tick of history and sets
+  flags level-triggered: `FAULT_BROWNOUT` /
+  `FAULT_ALC_DEGRADED` / `FAULT_I2C_ERR` / `FAULT_RING_DROPS` /
+  `FAULT_BACKPRESSURE` (ring HWM ≥ 75 %) / `FAULT_DSP_OVERBUDGET`
+  (`time_us_64()`-measured per-sample consumer body > 28 ms)
+  / `FAULT_STAGNANT_PRODUCER` / `FAULT_STAGNANT_CONSUMER` (no
+  advance for ≥ 3 s). **The supervisor never reboots; it only
+  reports.** The host (or `scripts/burn-in.sh`) decides what to
+  do with the flags.
+
+- **Stage D — Hardware watchdog + CI gate.**
+  RP2040 hardware watchdog, **8 s timeout**, enabled only after
+  core1 signals ready (so a configure-time crash leaves the
+  device hung-and-reflashable rather than boot-looping). Petted
+  *unconditionally* from the top of core0's main loop:
+
+  ```cpp
+  for (;;) {
+      watchdog_update();          // first thing — main-loop liveness only
+      drainRingToUsb(link);
+      link.pollHostInput();
+      // ... 1 Hz alive frame ...
+      sleep_us(200);
+  }
+  ```
+
+  The `do-not-gate-this-on-app-state` discipline is the most
+  important rule; it's spelled out in a long comment next to the
+  `watchdog_enable()` call. Application-level health (samples
+  flowing, ring drained, host responsive) belongs in the soft
+  liveness flags from Stage C, *not* in the petting condition,
+  because a transient miss must not reboot a working device.
+  `watchdog_caused_reboot()` runs once at boot and emits a
+  `StatusLog::warn("rebooted_by_watchdog", ...)` line so the host
+  can correlate.
+
+  `scripts/burn-in.sh` is the host-side gate: capture 60 s of
+  alive frames, assert `chip_ovf == 0 && ring_drops == 0 &&
+  dsp_overbudget == 0 && i2c_err == 0 && fault_flags == 0 &&
+  pwr_rdy ≤ 1`. The thresholds defined in firmware (`kDspBudgetUs`)
+  are the source of truth — the script is a witness, not an oracle.
+
+**Why.** Three interlocking reasons:
+
+1. The textbook embedded producer/consumer pattern, applied
+   honestly. No RTOS — a 2-task system on a dual-core M0+ doesn't
+   need one (the bare-metal expert called FreeRTOS for two tasks
+   "embarrassing"; the RTOS expert agreed and recommended saving
+   it for when BLE or display lands).
+2. **Observability is the alarm**, not the watchdog. The watchdog
+   is a last-resort recovery mechanism. The actual signal a
+   regression happened is the alive-frame counters going non-zero
+   and `scripts/burn-in.sh` failing in CI.
+3. **PWR_RDY recovery is non-negotiable.** Field deployments will
+   see brownouts (USB cable wiggles, marginal 5 V supply). A pulse-
+   oximeter that silently keeps reporting after a brownout is
+   strictly worse than one that says "hold on, recovering" and
+   reinits.
+
+**Tradeoff.** The change adds ~600 LoC across seven files, four
+new monotonic counters per stage, and one host-side script. Per-
+sample cost on core0 is one `time_us_64()` pair (~10 cycles) plus
+two `compare_exchange_weak` retries on the saturating max — total
+~30 cycles, dwarfed by the JSON `snprintf`. SPSC ring footprint
+is 768 B. RAM impact: **~1 KB** (ring + atomics + per-tick
+deltas). Code-size impact: ~3 KB.
+
+Tests grew from 30 → 37 host gtests (Stage A added 7 dispatch-path
+tests against `FakeI2cHal`).
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| FreeRTOS port (drain task + consumer task + queue). | ~6 KB code + scheduler overhead, devicetree noise, second toolchain. RTOS expert agreed: "for a 2-thread RP2040 problem, embarrassing." |
+| Watchdog gated on "samples flowing AND consumer advanced". | Boot-loop trap. A 600 ms DSP recompute spike during normal operation tries to reboot a working device. The user explicitly called this out: "watchdog should be configured very carefully, else we might end up in a state where it loops watchdogs out." |
+| `xStreamBuffer`-style dynamic-size ring. | Variable-size needs a heap or a fancy allocator; samples are fixed 12 B. Hand-rolled SPSC is cheaper and matches the data model. |
+| Move DSP to core0 too (driver becomes pure FIFO drain, observers vanish from `Max30102`). | Bigger refactor (driver public API change), no clearly proven win on hardware. Current setup keeps DSP in driver + observer chain on core1; the back-pressure problem was solved by moving USB to core0. Revisit if DSP cost ever becomes a bottleneck. |
+| Sticky fault flags (latch until host clears). | Conflates "currently degraded" with "ever degraded". Level-triggered is simpler, and the burn-in script samples the last frame which is enough to catch any never-cleared flag. |
+| `__scratch_x` core1-local SRAM for the ring. | Saves a couple of cross-bank reads on the consumer side; the bare-metal expert recommended it. Worth doing as a follow-up; not worth blocking the main change on. |
+
+**Follow-ups (tracked, not done):**
+
+- Move `g_ring` to `__scratch_x` core1-local SRAM with a section
+  attribute. Cleaner cross-core memory layout.
+- `cfg_crc` extended alive frame at 10 s — readback all written
+  config registers, CRC them, surface in `cfg_crc` field.
+  Catches "chip silently rebooted with the wrong config" beyond
+  what PWR_RDY covers (rare but possible on a flaky bus).
+- `Config::fifoAlmostFullThreshold` 4-bit truncation footgun
+  (D-14 follow-up). Fix the field type to `enum class FifoAFull
+  : uint8_t { ... }` with a `static_assert` on size.
+- Move plotter (`host/tools/plot_live.py`) and visualizer panel
+  redesign (mean / min / max overlays, perfusion index, lock
+  pill — see the medical/UX/data-viz round-table in conversation).
+
+---
+
+## D-16 — GPIO IRQ trampoline must run on the consumer's *peer* core
+
+**Context.** D-15 Stage A made core1 the producer (owns the I²C bus,
+runs the sensor driver) and core0 the consumer (drains the SPSC ring,
+formats USB JSON-Lines). For wake / sleep, core1 blocks on
+`multicore_fifo_pop_blocking()` and the GPIO IRQ trampoline pushes a
+wake token via `sio_hw->fifo_wr`. D-14 declared the IRQ-only path
+correct and dropped the D-12 polled fallback.
+
+The first hardware run of that combined design (2026-04-26 bench)
+wedged: exactly one edge fired at boot, then no more, with
+`smpl_d=0` indefinitely and `fault_flags=64` (STAGNANT_PRODUCER).
+Restoring a 100 ms safety poll temporarily proved the chip itself
+was producing samples normally — the IRQ pipeline was the bug.
+
+**Decision.** Register the GPIO IRQ from **core0**, not core1. Call
+`PicoIntPin::init()` from `main()` *before* `multicore_launch_core1()`,
+not from inside `core1_entry()`.
+
+**Why.** The RP2040 SIO inter-core FIFO is **directional per core**:
+`sio_hw->fifo_wr` on the calling core enqueues to *the other core's*
+RX FIFO. `multicore_fifo_pop_blocking()` reads from *the calling
+core's own* RX. So:
+
+- IRQ trampoline on core0 → push targets core0's TX = **core1's RX** → `pop_blocking` on core1 receives. ✓
+- IRQ trampoline on core1 → push targets core1's TX = **core0's RX** → `pop_blocking` on core1 reads its own RX, which no one writes to → blocks forever. ✗
+
+`gpio_set_irq_enabled_with_callback` binds the trampoline to the
+calling core's IRQ vector, so the *call site* of `PicoIntPin::init`
+determines which core runs the ISR. Moving that one call from
+`core1_entry` to `main()` fixes the routing.
+
+The on-bench effect was immediate: `edges` and `samplesDrained` go
+1:1, the consumer ring stays at depth 1, and HR/SpO2 update at
+sample-period cadence with no fallback poll.
+
+**Tradeoff.** The GPIO-IRQ-on-core0 placement crosses the producer-
+on-core1 boundary cosmetically — it looks weird in the call graph.
+The justification (peer-core wake routing) is documented at the
+call site in `main.cpp` and inside `core1_entry` so future readers
+don't undo the fix on principle.
+
+There is also a subtle dependency: `PicoIntPin::init` must be called
+*before* `multicore_launch_core1`, but core1 is what calls
+`Max30102::configure` which arms the LEDs and starts producing
+samples. So at the moment the IRQ becomes live, the chip is still
+quiet — exactly the order we want, no missed samples in the gap.
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| Hybrid IRQ + 100 ms poll (revert to D-12 shape). | Masks bugs rather than fixing them. The user explicitly pushed back: "I want IRQ to work … high interrupt rate doesn't mean the CPU shouldn't be able to handle it." At 25 Hz the M0+ has ~5 M cycles between samples; the ISR is a single atomic + a FIFO write — there is no throughput excuse for missing edges. |
+| Cross-core spinlock + `__wfe` on core1, `__sev` from core0 ISR. | Reinvents what `multicore_fifo_pop_blocking` already does, just without the routing bug. Once the routing was fixed, the SDK primitive is the right answer. |
+| `sem_t` on core1, `sem_release` from core0 ISR. | Slightly heavier, no advantage on a 2-task system. |
+| Move I²C bus ownership to core0 too (driver + drain on the same core). | Big refactor, undoes D-15 producer/consumer split. Not justified by a single SDK gotcha. |
+
+**Follow-ups (tracked, not done).**
+
+- Add a host gtest that asserts `PicoIntPin::init` runs on core0.
+  Hard to express without cross-compiling — likely a doc-only
+  guard in `core1_entry` (a static-assert-ish runtime check that
+  `multicore_fifo_wready()` was already exercised once before
+  the loop body runs).
+
+---
+
+## D-17 — Median-of-3 output filter on HR
+
+**Context.** The Maxim batch HR algorithm (D-13) recomputes once per
+second over the last 4 s of IR data. On a quietly-resting finger it
+converges within 4–6 s, then mostly stays stable — but occasionally a
+single recompute lands on a noisy peak set and reports a one-cycle
+excursion before the next recompute window re-converges.
+
+Bench data, 30 s capture with finger held still
+(`/tmp/oxinode-hr-30s.jsonl`, 2026-04-26):
+
+- median = 88 BPM (stable)
+- 90 % of readings = 88
+- 10 % split among single-second excursions to 68, 93, 115
+- each excursion lasts exactly one 1 Hz recompute window before snapping back
+
+The pattern is unambiguous: isolated outliers surrounded by stable
+neighbours. SpO2 over the same window: 96 or 97, no excursions.
+
+**Decision.** Add a 3-deep ring of recompute outputs (including the
+0-sentinel for "not yet valid") to `HrDetector`. `bpm()` returns the
+median of the latest three entries.
+
+```cpp
+static constexpr int kBpmMedianN = 3;
+uint8_t m_bpmHistory[kBpmMedianN] = {};
+int     m_bpmHistoryHead = 0;
+// pushOutput(...) writes ring + sets m_bpm = medianOf3(...)
+```
+
+**Why.** Median-of-3 squashes any single-tick outlier sandwiched
+between two stable readings — exactly the failure pattern. Pushing
+the 0-sentinel on invalid recomputes also gives a graceful fadeout
+when the finger is removed: after `kBufferSec + kBpmMedianN` = 7 s of
+no signal, the ring fully drains and `bpm()` returns 0.
+
+**Tradeoff.** Up to `kBpmMedianN-1` = 2 s of extra latency on a *real*,
+sustained HR change. Acceptable for steady-finger SpO2 use. Not
+acceptable for HRV / fitness applications, but those want the raw
+beat-to-beat intervals anyway, not a debounced display value.
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| Tighten `kBpmMin/kBpmMax` plausibility band. | The spurious values (68, 93, 115) are all firmly inside any sensible adult-resting band. Doesn't filter them. |
+| Rolling mean over last N. | Not robust — one 115 BPM excursion drags a 3-sample mean to 90.3, which on uint8 displays as 90 (a wrong but not-obviously-wrong value). Median ignores the outlier entirely. |
+| Reject if `|new − last| > 20 %` (rate-of-change limiter). | Latches forever if the very first valid reading happens to be wrong (no recovery path without reset). |
+| Smooth at the host (in `plot_live.py`). | Makes the OLED dashboard see un-smoothed values. The smoothing belongs at the source of truth, which is the driver. |
+
+Median-of-3 also has the cleanest invariant: **`bpm()` is always a
+real value the algorithm produced at some recompute** — never an
+average that nobody actually computed.
+
+---
+
+## D-18 — SSD1306 OLED dashboard on a separate I²C bus
+
+**Context.** Bring-up was working with HR/SpO2 streaming to a host
+client over USB-CDC, but a host requirement makes the device feel
+incomplete for hands-on demo / wearable use. The user supplied a
+0.96" SSD1306 OLED (128×64, I²C, address 0x3C) and wired it to
+GP14/GP15.
+
+**Decision.** Add a portable SSD1306 driver (`lib/ssd1306/`) mirroring
+the `lib/max3010x/` pattern: own minimal `IBus` interface (write-only
+— SSD1306 is fire-and-forget), embedded 5×7 font, 128×64 frame
+buffer, `init()` / `clear()` / `drawPixel()` / `drawText()` /
+`drawDashboard()` / `flush()`. Run it on **I²C1** (GP14/GP15, 400 kHz),
+fully isolated from the MAX30102 on I²C0. Render the OxiNode
+dashboard at the same 1 Hz cadence as the alive frame; OLED
+init / flush failures log once but never block sensor data.
+
+**Why.**
+
+1. Two I²C peripherals → no bus contention. A 1 KB full-frame OLED
+   flush takes ~25 ms at 400 kHz; co-locating it on I²C0 with the
+   MAX30102 sample drain would either need bus arbitration logic
+   or risk starving the chip's drain.
+2. Portable lib (no platform headers, host-testable) keeps the same
+   contract as `lib/max3010x`. Re-used the existing `FakeI2cHal`-
+   style test pattern with a small `FakeSsd1306Bus`. 11 host gtests
+   cover init, framebuffer, text, flush, and dashboard.
+3. Optional UI semantics: if the panel is unplugged at boot, the
+   firmware logs `oled_init_failed` once and the JSON-Lines link
+   to the host keeps flowing. The OLED never gates the sensor path.
+
+**Tradeoff.** RP2040 has only two I²C peripherals; we now use both.
+A future feature that needs a third I²C device has to share a bus
+with one of the existing two (either by address or by software
+arbitration). Acceptable: nothing on the roadmap needs that yet.
+
+**Alternatives considered.**
+
+| Option | Why rejected |
+|--------|--------------|
+| Share I²C0 with the MAX30102 (different address, same bus). | Adds a 25 ms full-frame burst into the sensor drain timing. Doable, but no benefit — we have a free I²C peripheral. |
+| PIO-bit-bang I²C on arbitrary pins. | The user moved wires cleanly to a hardware I²C1 pair, so PIO complexity isn't justified. |
+| Bigger / scaled font for "BPM" / "%" digits. | The 5×7 font fits "OxiNode v1.0 / HR : 075 bpm / SpO2:  98 %" cleanly with room for future fields. Bigger digits is a follow-up, not a blocker. |
+
+**Follow-ups (tracked, not done).**
+
+- Larger font for BPM / SpO2 readouts (12×16 bitmap or 2× scaled
+  5×7) for at-a-glance readability.
+- Plot a tiny 1-line PPG waveform on the bottom half of the OLED
+  using rolling IR samples. Reuses the same SPSC ring contents
+  the USB consumer already drains.
+- Page-mode partial flush (write only the row(s) that changed) to
+  drop refresh cost from ~25 ms → ~3 ms. Worth it once we want
+  >1 Hz dashboard updates.

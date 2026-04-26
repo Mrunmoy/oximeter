@@ -37,6 +37,19 @@ A wrong VIN connection on a clone with a missing LDO will brick the sensor
 silently — the I²C interface keeps responding with garbage until the part
 finally dies hours later.
 
+> **Known PCB defect on a subset of GY-MAX30102 batches.** Many cheap
+> "GY-MAX30102" modules tie the SDA / SCL / INT pull-ups to the **internal
+> 1.8 V rail** (the chip's `VDD` digital supply) instead of the host's
+> 3.3 V. On a 3.3 V I²C master this gives marginal logic levels and
+> intermittent NACKs; on a 5 V master it is just broken. The fix is a
+> trace-cut and a wire jumper to the 3.3 V rail. Reedpaper has photos
+> and a step-by-step:
+> <https://reedpaper.wordpress.com/2018/08/22/pulse-oximeter-max30100-max30102-how-to-fix-wrong-board/>.
+> If your board reads PART_ID = 0x15 cleanly, drains the FIFO without
+> errors, and the IRQ fires consistently, your batch already has the
+> pull-ups in the right place — leave it alone. If you see flaky I²C
+> at 100 kHz, this is the first thing to check.
+
 ---
 
 ## 2. RP2040-Zero — Waveshare
@@ -79,7 +92,8 @@ edge-accessible pair:
 
 ### Verified wiring on the bench
 
-The bring-up board adds two harmless pads to the canonical four:
+The bring-up board exposes two extra silkscreen-labelled pads beyond the
+canonical four:
 
 | MAX30102 pad | RP2040-Zero pad | Role |
 |--------------|-----------------|------|
@@ -88,10 +102,33 @@ The bring-up board adds two harmless pads to the canonical four:
 | SDA | GP4 | I²C0 SDA |
 | SCL | GP5 | I²C0 SCL |
 | INT | GP6 | open-drain interrupt — drives the RP2040 GPIO IRQ |
-| RD | GP7 | optional — RED LED drive monitor; firmware leaves GP7 as input, no contention |
-| IRQ | GP8 | optional — duplicate of INT on this breakout; firmware leaves GP8 as input |
+| RD | GP7 | **vestigial** — see callout below; firmware leaves GP7 as input, no contention |
+| IRQ / IRD | GP8 | **vestigial** — see callout below; firmware leaves GP8 as input |
 
-The RD/IRQ pads are silkscreen labels on the breakout; the underlying chip has only one INT. Wiring them to additional GPIOs costs nothing because the firmware only configures GP4/GP5/GP6.
+> **Why are `RD` and `IRD` (sometimes silkscreened `IRQ`) on the breakout
+> at all?** They are *vestigial labels copied from the MAX30100 PCB
+> layout.* The MAX30100 (predecessor chip) brought its LED cathodes out
+> on dedicated pins for an external sense-resistor topology. The
+> MAX30102 *integrates the LED drivers and the LEDs themselves into the
+> 14-OESIP optical package* — so the chip pins these pads route to are
+> all explicitly **N.C.** in the datasheet:
+>
+> > *"No Connection. Connect to PCB pad for mechanical stability."*
+> > — MAX30102 datasheet rev 1, §Pin Description, p.8 (pins 1, 5, 6, 7, 8, 14)
+>
+> When PCB designers retrofitted the older MAX30100 module layout for
+> the MAX30102 die, they kept the silkscreen text. The traces under
+> those pads still go to chip pins, but those chip pins are not
+> connected to anything inside the silicon. Continuity-check them
+> against ground or the 3.3 V rail with a multimeter and you will see
+> open in both directions — they are floating.
+>
+> **Practical implication.** Wiring `RD` → `GP7` and `IRD` → `GP8` is
+> harmless: the GPIOs see open inputs, the firmware never reads or
+> writes them, and there is no contention. Don't try to "use" them for
+> anything sensor-related; there is nothing to use. The only real
+> interrupt the chip exposes is the single `INT` pin (chip pin 13 →
+> breakout `INT` → `GP6`).
 
 ### Final wiring — RP2040-Zero ↔ MAX30102
 
@@ -102,13 +139,39 @@ The RD/IRQ pads are silkscreen labels on the breakout; the underlying chip has o
 | `GP4` | ↔ | `SDA` | I²C0 SDA, 100 kHz; 4.7 kΩ pull-up on the breakout. |
 | `GP5` | → | `SCL` | I²C0 SCL, 100 kHz; 4.7 kΩ pull-up on the breakout. |
 | `GP6` | ← | `INT` | Open-drain, active low. **Internal pull-up enabled in firmware** (`firmware/rp2040/hal/PicoIntPin.cpp`). Falling-edge IRQ on FIFO_A_FULL. |
-| — | — | `IRD` | Leave floating. LED-current monitor pin, not used. |
-| — | — | `RD` | Leave floating. LED-current monitor pin, not used. |
+| — | — | `IRD` | Leave floating. Vestigial label routed to chip N.C. pin (see §2 callout). |
+| — | — | `RD` | Leave floating. Vestigial label routed to chip N.C. pin (see §2 callout). |
 
 `pins.hpp` for this target lives at
 `firmware/rp2040/include/board/pins.hpp` and is the single source of truth —
 if it disagrees with this document, fix the document or fix the header, but
 never both at once.
+
+### Optional — SSD1306 OLED dashboard on I²C1
+
+A 0.96" 128×64 SSD1306 OLED (I²C variant, address 0x3C) renders a live
+HR / SpO₂ dashboard so the device is useful standalone, without a host
+client attached. The OLED runs on **I²C1** — completely separate from
+the MAX30102's I²C0 — so its full-frame refresh (~25 ms at 400 kHz)
+cannot back-pressure the sensor drain.
+
+| RP2040-Zero pin | Direction | SSD1306 pin | Notes |
+|-----------------|-----------|-------------|-------|
+| `3V3` (OUT) | → | `VDD` / `VCC` | Most modules accept 3.3–5 V via on-module charge-pump. |
+| `GND` | — | `GND` | |
+| `GP14` | ↔ | `SDA` | I²C1 SDA, 400 kHz fast-mode. Internal pull-up enabled in firmware. |
+| `GP15` | → | `SCL` | I²C1 SCL, 400 kHz. Internal pull-up enabled in firmware. |
+
+Pin pair rationale: GP14/GP15 is the cleanest free I²C1 pair on the
+RP2040-Zero pin map. The other valid I²C1 SDA/SCL pair (GP6/GP7) is
+unusable here because GP6 is the MAX30102 INT line. GP4–GP9 are
+already wired to the sensor or its vestigial pads.
+
+The OLED is **optional**. If the panel is unplugged (or its breakout
+fails to ack on the bus), `Ssd1306::init()` returns non-zero, the
+firmware emits one `oled_init_failed` log line, and continues normally
+— the JSON-Lines link to a host client is the source of truth and
+must keep flowing regardless.
 
 ---
 
@@ -130,7 +193,7 @@ GND   VIN   SCL   SDA   INT   IRD   RD
 - 4.7 kΩ pull-ups to the LDO output on SDA and SCL.
 - INT is pulled to the same rail through 4.7 kΩ on some revisions, floating
   on others — assume floating and enable the host pull-up.
-- IRD and RD are LED-drive monitor outputs; do not connect.
+- IRD and RD are vestigial silkscreen labels routed to chip N.C. pins (see §2 callout); do not connect.
 
 This is the variant assumed by the canonical wiring in §2.
 

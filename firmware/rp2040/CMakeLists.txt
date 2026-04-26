@@ -63,5 +63,13 @@ add_subdirectory(
     ${CMAKE_BINARY_DIR}/lib_max3010x
 )
 
+# Portable SSD1306 OLED driver — same portability contract as
+# lib/max3010x: only depends on its own ssd1306::IBus interface,
+# no platform headers, host-testable.
+add_subdirectory(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/ssd1306
+    ${CMAKE_BINARY_DIR}/lib_ssd1306
+)
+
 # ── Applications ─────────────────────────────────────────────────
 add_subdirectory(apps/oxinode)

@@ -28,19 +28,48 @@ namespace oxinode::max3010x
         // largest read we'll ever issue.
         static constexpr int kFifoBurstBytes = reg::kFifoDepth * reg::kBytesPerEntrySpo2;
 
+        // Telemetry / observability surface. Counters are *monotonic*
+        // — they only ever increase. Callers compute deltas if they
+        // want a per-window view. Reset to zero only when the driver
+        // is reconstructed (or via reset(), which is what configure()
+        // does on a brownout-recovery path). The convention follows
+        // the design discussion in `docs/DESIGN.md` D-15: never reset
+        // counters on read, lest the host miss a brief recall event.
+        struct Stats
+        {
+            uint32_t samplesDrained = 0;   // total samples decoded across all calls
+            uint32_t chipOvfTotal   = 0;   // sum of OVF_COUNTER values seen
+            uint32_t pwrRdyEvents   = 0;   // brownout-recovery count
+            uint32_t alcOvfEvents   = 0;   // ambient-light-cancellation overflow
+            uint32_t i2cErrTotal    = 0;   // I²C transactions that failed
+            uint8_t  lastInt1       = 0;   // last-read INTR_STATUS_1
+            uint8_t  lastInt2       = 0;   // last-read INTR_STATUS_2
+        };
+
         struct Config
         {
             uint8_t          devAddr   = reg::kI2cAddr;
             Mode             mode      = Mode::Spo2;
+            // SR=100 Hz × SMP_AVE=4 → 25 Hz output, the rate Maxim's
+            // HR reference algorithm (UG6409 p.29-30) is tuned for.
             SampleAveraging  avg       = SampleAveraging::AVG_4;
             SampleRate       rate      = SampleRate::SR_100;
             PulseWidth       pulseWidth = PulseWidth::PW_411_18BIT;
             AdcRange         adcRange   = AdcRange::RANGE_4096;
-            // Raw register codes — datasheet table 8 gives ~0.2 mA per
-            // count; 0x24 ≈ 7 mA per LED is a safe default for a
-            // pressed-finger SpO2 reading on a GY-MAX30102 breakout.
-            uint8_t          redLedPa  = 0x24;
-            uint8_t          irLedPa   = 0x24;
+            // 0x3F ≈ 12.5 mA peak (LSB ≈ 0.2 mA per datasheet Table 8).
+            // On the GY-MAX30102 breakout pressed against a fingertip,
+            // this lands DC at ≈240 K (IR) and ≈207 K (RED) — well above
+            // AN6845's 150 K finger-floor (p.9). DC sits at ~91 % FS,
+            // *above* UG6409 p.19's "¼ – ¾ FS" SpO2 sweet-spot, but in
+            // practice peak DC stays ~7 % below the 18-bit ADC ceiling
+            // and the larger AC swing (~12 K vs 8 K @ 0x30) materially
+            // improves HR find_peaks SNR. The UG6409 ¾-FS ceiling is a
+            // production-skin-tone-spread headroom rule that does not
+            // bind for benchtop bring-up. Verified empirically: 0x30
+            // hit the doctrinal target but HR scattered 48–166 BPM,
+            // while 0x3F locks cleanly to a single resting BPM.
+            uint8_t          redLedPa  = 0x3F;
+            uint8_t          irLedPa   = 0x3F;
             // FIFO almost-full triggers when (32 - threshold) entries
             // remain unread — i.e. threshold == 17 means "fire IRQ when
             // 15 unread entries are buffered". 0x0F is the chip default.
@@ -84,6 +113,10 @@ namespace oxinode::max3010x
         [[nodiscard]] uint8_t bpm() const  { return m_hr.bpm(); }
         [[nodiscard]] uint8_t spo2() const { return m_spo2.spo2(); }
 
+        // Snapshot of internal observability counters. Cheap (8 words),
+        // safe to call from any context. See `Stats` for semantics.
+        [[nodiscard]] Stats stats() const { return m_stats; }
+
     private:
         // Decodes one 6-byte SpO2 FIFO entry (RED first, then IR). Each
         // 3-byte channel is MSB-first; only the low 18 bits are valid.
@@ -104,6 +137,7 @@ namespace oxinode::max3010x
         int              m_observerCount = 0;
         HrDetector       m_hr{};
         Spo2Algo         m_spo2{};
+        Stats            m_stats{};
         // Burst-read scratch. Sized for the worst case (SpO2 mode,
         // 32 entries × 6 bytes = 192 B). Statically allocated — caller
         // never sees it.

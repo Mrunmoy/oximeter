@@ -168,18 +168,60 @@ namespace oxinode::max3010x
 
     int Max30102::handleInterrupt()
     {
-        // Read both status registers in one go — the I²C peripheral
-        // auto-increments past 0x00. We MUST read them to clear the
-        // latched interrupt; the chip won't pull INT high otherwise.
+        // ─── 1. Read both interrupt-status registers in one I²C burst.
+        // The I²C peripheral auto-increments past 0x00 → 0x01. Reading
+        // INTR_STATUS_1 also clears the latched bits (datasheet p.13)
+        // — that's how the chip knows we acknowledged the IRQ and can
+        // re-arm the INT line. The cached values land in m_stats so
+        // the firmware-side alive frame can surface them later without
+        // burning a second I²C transaction.
         uint8_t status[2] = {};
         int rc = m_hal.i2cReadReg(m_cfg.devAddr, reg::INTR_STATUS_1,
                                   status, sizeof(status));
         if (rc != 0)
         {
+            ++m_stats.i2cErrTotal;
             return -1;
         }
+        m_stats.lastInt1 = status[0];
+        m_stats.lastInt2 = status[1];
 
-        // No FIFO event → nothing to do (e.g. PWR_RDY-only wake).
+        // ─── 2. PWR_RDY first — this bit means the chip just came up
+        // from a brownout (datasheet p.12: "On power-up or after a
+        // brownout condition... a power-ready interrupt is triggered
+        // to signal that the module is powered-up and ready"). It is
+        // the only interrupt source that *cannot* be disabled, and its
+        // semantics are "your configuration is gone, reload it before
+        // you trust any data". We honour that by re-running the same
+        // configure() the platform code used at boot — which itself
+        // calls reset(), clearing FIFO pointers and DSP state. Any
+        // A_FULL/PPG_RDY bits set in the same status read are
+        // pre-brownout artefacts and not trustworthy; we drop the
+        // would-be drain and let the next IRQ start fresh.
+        if ((status[0] & reg::INT_PWR_RDY) != 0)
+        {
+            ++m_stats.pwrRdyEvents;
+            const int reconfigRc = configure(m_cfg);
+            if (reconfigRc != 0)
+            {
+                ++m_stats.i2cErrTotal;
+                return reconfigRc;
+            }
+            return 0;
+        }
+
+        // ─── 3. ALC_OVF — ambient-light cancellation has saturated.
+        // Samples that follow are degraded but still well-framed. We
+        // count the event so a "your room is too bright" alarm is
+        // possible host-side, then continue with the drain.
+        if ((status[0] & reg::INT_ALC_OVF) != 0)
+        {
+            ++m_stats.alcOvfEvents;
+        }
+
+        // ─── 4. FIFO event? If neither A_FULL nor PPG_RDY, nothing is
+        // pending. (Pure ALC_OVF is one such case — counter bumped
+        // above, no drain.)
         const bool fifoEvent =
             (status[0] & (reg::INT_A_FULL | reg::INT_PPG_RDY)) != 0;
         if (!fifoEvent)
@@ -187,31 +229,36 @@ namespace oxinode::max3010x
             return 0;
         }
 
-        // Compute number of unread entries from the pointer pair.
-        // OVF_COUNTER bumps when the FIFO wrapped — we still drain
-        // whatever's between RD and WR, but we surface the overflow
-        // by skipping counts so callers can detect the gap.
+        // ─── 5. Drain. Compute number of unread entries from the
+        // pointer pair. OVF_COUNTER bumps when the FIFO wrapped — its
+        // value is the number of samples *lost* before we got here
+        // (saturates at 0x1F per datasheet p.13). We accumulate it
+        // monotonically so the host can measure how often we're
+        // falling behind, and we still drain whatever survived
+        // between RD and WR.
         uint8_t ptrs[3] = {};
         rc = m_hal.i2cReadReg(m_cfg.devAddr, reg::FIFO_WR_PTR,
                               ptrs, sizeof(ptrs));
         if (rc != 0)
         {
+            ++m_stats.i2cErrTotal;
             return -1;
         }
         const uint8_t wrPtr = ptrs[0] & 0x1F;
         const uint8_t ovf   = ptrs[1] & 0x1F;
         const uint8_t rdPtr = ptrs[2] & 0x1F;
+        m_stats.chipOvfTotal += ovf;
 
         int unread = static_cast<int>(wrPtr) - static_cast<int>(rdPtr);
         if (unread < 0)
         {
             unread += reg::kFifoDepth;
         }
-        // OVF != 0 means the chip wrapped; the unread count is then
-        // the full FIFO. We log via the (non-existent) overflow
-        // counter — for now just treat it as "drain everything".
         if (ovf > 0)
         {
+            // Chip wrapped at least once; what's reachable is the full
+            // 32-deep window. The dropped samples already showed up in
+            // chipOvfTotal above.
             unread = reg::kFifoDepth;
         }
         if (unread == 0)
@@ -236,6 +283,7 @@ namespace oxinode::max3010x
                               m_burst, toRead);
         if (rc != 0)
         {
+            ++m_stats.i2cErrTotal;
             return -1;
         }
 
@@ -258,6 +306,7 @@ namespace oxinode::max3010x
             notifySample(tMs, ir, red);
         }
 
+        m_stats.samplesDrained += static_cast<uint32_t>(unread);
         notifyHrSpo2(tMs);
         return unread;
     }

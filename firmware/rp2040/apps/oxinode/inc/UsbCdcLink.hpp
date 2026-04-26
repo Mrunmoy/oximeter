@@ -56,15 +56,42 @@ namespace oxinode::rp2040
         void writeStatus(const char* status, const char* reason);
 
         // ── Outgoing — alive heartbeat (1 Hz) ───────────────────
-        // Diagnostic-rich: surfaces probe / configure return codes and
-        // the latest INTR_STATUS_{1,2} so the host can tell from a
-        // single line whether the chip has been talked to and whether
-        // it's currently asserting an interrupt.
-        void writeAlive(std::uint32_t tMs, std::uint32_t edges,
-                        std::int16_t hr, std::int16_t spo2,
-                        std::int8_t probeRc, std::int8_t configureRc,
-                        std::uint8_t int1, std::uint8_t int2,
-                        std::int32_t lastDrainRc);
+        // Diagnostic-rich: surfaces probe / configure return codes,
+        // the latest INTR_STATUS_{1,2}, every observability counter
+        // (Stage A driver stats, Stage B ring stats, Stage C liveness
+        // flags). Counters are monotonic u32 — the host computes
+        // deltas if it wants a per-second view.
+        struct AliveStats
+        {
+            std::uint32_t tMs;
+            std::uint32_t edges;
+            std::int16_t  hr;
+            std::int16_t  spo2;
+            std::int8_t   probeRc;
+            std::int8_t   configureRc;
+            std::uint8_t  int1;
+            std::uint8_t  int2;
+            std::int32_t  lastDrainRc;
+
+            // Stage A — driver-level
+            std::uint32_t samplesDrained;
+            std::uint32_t chipOvf;
+            std::uint32_t pwrRdy;
+            std::uint32_t alcOvf;
+            std::uint32_t i2cErr;
+
+            // Stage B — ring + consumer
+            std::uint32_t samplesConsumed;
+            std::uint32_t ringDrops;
+            std::uint32_t ringHwm;
+            std::uint32_t dspUsMax;
+            std::uint32_t dspOverbudget;
+
+            // Stage C — soft liveness summary
+            std::uint32_t faultFlags;
+        };
+
+        void writeAlive(const AliveStats& s);
 
         // ── Incoming — control parser ───────────────────────────
         // Drains any bytes available on CDC RX and parses complete

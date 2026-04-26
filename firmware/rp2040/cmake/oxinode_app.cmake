@@ -57,7 +57,9 @@ function(oxinode_add_app app_name)
         hardware_gpio
         hardware_irq
         hardware_timer
+        hardware_watchdog
         oxinode_max3010x
+        oxinode_ssd1306
     )
 
     # USB-CDC: pico_enable_stdio_usb brings pico_stdio_usb (and

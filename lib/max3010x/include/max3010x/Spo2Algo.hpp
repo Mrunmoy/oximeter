@@ -2,31 +2,51 @@
 
 #include <cstdint>
 
-// Maxim ratio-of-ratios SpO2 estimator. Maintains a rolling 1-second
-// window (100 samples at 100 Hz) of IR and RED, computes AC RMS and DC
-// mean per channel, then:
+// Maxim ratio-of-ratios SpO2 estimator. Maintains a 100-sample rolling
+// window of IR and RED samples (4 s at the chip's 25 Hz post-AVG_4
+// output rate), computes AC RMS and DC mean per channel, then:
 //
 //   R    = (AC_red / DC_red) / (AC_ir / DC_ir)
-//   SpO2 = 110 - 25 · R     (Maxim reference linear approximation)
+//   SpO2 = a · R² + b · R + c   (AN6845 Table 1, p.13)
 //
-// Saturated at 100. The full Maxim AN6409 polynomial is more accurate
-// but only marginally so for the 70-100 % range we care about; the
-// linear form is what most open-source MAX30102 drivers use and what
-// this project's docs commit to.
+// Calibration coefficients are Maxim's published defaults for the
+// MAX30101 / MAX30102 with no optical shield (kSpO2A, kSpO2B, kSpO2C
+// below). UG6409 p.6 also gives a simpler linear approximation
+// `SpO2 = 104 - 17R` from S. Prahl (1996); we keep that as the
+// `kPrahlA / kPrahlB` constants for reference but use AN6845's
+// quadratic by default since it is what Maxim ships as their
+// calibrated curve for the MAXREFDES117# / MAX32664 reference design.
+// Result is saturated to [0, 100].
 
 namespace oxinode::max3010x
 {
     class Spo2Algo
     {
     public:
-        // 1 second of samples at the default 100 Hz rate. Enough cycles
-        // (≥ 1 heartbeat) for AC RMS to be well-defined.
+        // 100 samples = 4 s at the chip's 25 Hz post-AVG_4 output. Long
+        // enough that AC RMS contains several cardiac cycles even at
+        // 30 BPM, short enough to track real saturation transients.
         static constexpr int kWindow = 100;
 
         // DC threshold below which the finger is considered missing.
-        // The MAX30102 in normal operation reads ~50 k counts on a
-        // pressed finger; ambient-light reading on bare skin is < 5 k.
+        // The MAX30102 in normal operation reads >150 k counts on a
+        // pressed finger (AN6845 step 8, p.9); ambient-light reading
+        // on bare skin is < 5 k.
         static constexpr uint32_t kDcMinCounts = 5000;
+
+        // AN6845 Table 1 (p.13) — calibrated SpO2 = aR² + bR + c for
+        // the MAX30101 / MAX30102 with no optical shield. These are
+        // Maxim's published defaults, derived from a 20-subject
+        // controlled-O2 calibration in their lab.
+        static constexpr double kSpO2A = 1.5958422;
+        static constexpr double kSpO2B = -34.6596622;
+        static constexpr double kSpO2C = 112.6898759;
+
+        // UG6409 p.6 simple linear fallback (S. Prahl 1996); kept as
+        // constants for clarity / cross-checking but not used unless
+        // a caller swaps the curve at compile time.
+        static constexpr double kPrahlA = -17.0;
+        static constexpr double kPrahlB = 104.0;
 
         Spo2Algo() = default;
 

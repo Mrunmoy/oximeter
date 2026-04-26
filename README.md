@@ -73,6 +73,19 @@ RP2040-Zero            MAX30102 breakout (GY-style 7-pin)
   ──         ──        RD               (leave floating — LED-drive monitor pin)
 ```
 
+Optional 0.96″ SSD1306 OLED for a standalone HR / SpO₂ dashboard:
+
+```
+RP2040-Zero            SSD1306 OLED (128×64, I²C, 0x3C)
+─────────────          ─────────────────────────────────────
+  3V3 (OUT)  ────────▶ VDD              (3.3–5 V, on-module charge-pump)
+  GND        ────────▶ GND
+  GP14       ◀──────▶ SDA               (I²C1, 400 kHz)
+  GP15       ────────▶ SCL              (I²C1, 400 kHz)
+```
+
+The OLED is fully optional — if it's unplugged the firmware logs `oled_init_failed` once and the USB-CDC link keeps working normally.
+
 Full pin tables for both boards plus a fallback wiring for ESP32-S3 are in [`docs/HARDWARE.md`](docs/HARDWARE.md).
 
 ---
@@ -139,12 +152,11 @@ oxinode/
 
 | Component | State |
 |-----------|-------|
-| Portable driver core (`lib/max3010x/`) | **Working** — driver verified byte-for-byte against MAX30102 datasheet pages 10–15 (`docs/DATASHEETS.md`) |
-| Host gtest suite | **27/27 passing** |
-| RP2040 firmware | **First light** — SpO2 = 98 % off finger, JSON-Lines streaming over USB-CDC at `/dev/ttyACM0` |
+| Portable driver core (`lib/max3010x/`) | **Working** — driver verified byte-for-byte against MAX30102 datasheet pages 10–15 (`docs/DATASHEETS.md`); HR + SpO2 paths follow Maxim UG6409 + AN6845 references (see `docs/DESIGN.md` D-13) |
+| Host gtest suite | **30/30 passing** |
+| RP2040 firmware | **HR + SpO2 working** — locks 78 BPM resting and 97 % SpO2 off finger, JSON-Lines streaming over USB-CDC at `/dev/ttyACM0` |
 | Python desktop client | **Working** — 22/22 pytest, mypy --strict, ruff clean. Untested against live RP2040. |
 | ESP32-S3 firmware | **Skeleton only — phase 2** (untested in Docker) |
-| Open: HrDetector tuning | HR locks at -1 (AVG_1) / 31 (AVG_4). DSP-side fix in `lib/max3010x/src/HrDetector.cpp` — needs band-pass pre-filter + faster envelope α. SpO2 path unaffected. |
 | Open: `MODE BIN` host command parsing | Disabled in current RP2040 firmware (pico_stdio_usb owns the USB descriptor; `tud_cdc_n_*` are gated). JSON-Lines path covers v1. |
 
 ---

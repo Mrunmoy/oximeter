@@ -141,7 +141,7 @@ namespace
         }
     }
 
-    TEST(Max30102Test, HandleInterruptNoEventDoesNothing)
+    TEST(Max30102Test, HandleInterruptNoFlagsSetIsNoOp)
     {
         FakeI2cHal hal;
         Max30102 dev(hal);
@@ -150,11 +150,192 @@ namespace
         CapturingObserver obs;
         dev.addObserver(&obs);
 
-        // Only PWR_RDY set — no FIFO traffic to drain.
+        // Spurious wake — interrupt status is clear (e.g. another
+        // process beat us to reading INTR_STATUS_1, or the line
+        // glitched). Driver should burn one I²C read and return 0
+        // without firing observers or touching counters.
+        hal.setReg(reg::INTR_STATUS_1, 0);
+        const Max30102::Stats before = dev.stats();
+        EXPECT_EQ(0, dev.handleInterrupt());
+        EXPECT_TRUE(obs.samples.empty());
+        const Max30102::Stats after = dev.stats();
+        EXPECT_EQ(before.samplesDrained, after.samplesDrained);
+        EXPECT_EQ(before.pwrRdyEvents,   after.pwrRdyEvents);
+        EXPECT_EQ(before.alcOvfEvents,   after.alcOvfEvents);
+    }
+
+    TEST(Max30102Test, HandleInterruptPwrRdyTriggersReconfigure)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        CapturingObserver obs;
+        dev.addObserver(&obs);
+
+        // Simulate brownout-recovery: chip raises PWR_RDY. Datasheet
+        // p.12-13 says config + FIFO state are gone; driver must
+        // reconfigure before any drain is trustworthy.
         hal.setReg(reg::INTR_STATUS_1, reg::INT_PWR_RDY);
+        hal.clearWrites();   // forget the configure() at line 1 of test
 
         EXPECT_EQ(0, dev.handleInterrupt());
         EXPECT_TRUE(obs.samples.empty());
+
+        // Reconfigure path must have re-written the same register
+        // block as the original configure(). Spot-check the load-
+        // bearing ones.
+        EXPECT_TRUE(hal.wasWritten(reg::FIFO_CONFIG));
+        EXPECT_TRUE(hal.wasWritten(reg::SPO2_CONFIG));
+        EXPECT_TRUE(hal.wasWritten(reg::LED1_PA));
+        EXPECT_TRUE(hal.wasWritten(reg::LED2_PA));
+        EXPECT_TRUE(hal.wasWritten(reg::INTR_ENABLE_1));
+        EXPECT_TRUE(hal.wasWritten(reg::MODE_CONFIG));
+
+        EXPECT_EQ(1u, dev.stats().pwrRdyEvents);
+        EXPECT_EQ(reg::INT_PWR_RDY, dev.stats().lastInt1);
+    }
+
+    TEST(Max30102Test, HandleInterruptAlcOvfOnlyCountsButDoesNotDrain)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        CapturingObserver obs;
+        dev.addObserver(&obs);
+
+        // Pure ALC_OVF — ambient light saturated, no FIFO event.
+        // Counter ticks; no drain; no observer notification.
+        hal.setReg(reg::INTR_STATUS_1, reg::INT_ALC_OVF);
+
+        EXPECT_EQ(0, dev.handleInterrupt());
+        EXPECT_TRUE(obs.samples.empty());
+        EXPECT_EQ(1u, dev.stats().alcOvfEvents);
+        EXPECT_EQ(0u, dev.stats().samplesDrained);
+    }
+
+    TEST(Max30102Test, HandleInterruptAlcOvfWithPpgRdyStillDrains)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        CapturingObserver obs;
+        dev.addObserver(&obs);
+
+        // Bright room, but a sample is still pending. We count the
+        // ALC_OVF (the sample is degraded) AND drain it — discarding
+        // would lose data the application can still partially trust.
+        hal.pushSpo2Entry(0x100, 0x200);
+        hal.setReg(reg::INTR_STATUS_1,
+                   static_cast<uint8_t>(reg::INT_ALC_OVF | reg::INT_PPG_RDY));
+        hal.setReg(reg::FIFO_WR_PTR, 1);
+        hal.setReg(reg::FIFO_RD_PTR, 0);
+        hal.setReg(reg::OVF_COUNTER, 0);
+
+        EXPECT_EQ(1, dev.handleInterrupt());
+        EXPECT_EQ(1u, obs.samples.size());
+        EXPECT_EQ(1u, dev.stats().alcOvfEvents);
+        EXPECT_EQ(1u, dev.stats().samplesDrained);
+    }
+
+    TEST(Max30102Test, HandleInterruptAccumulatesChipOvfCounter)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        CapturingObserver obs;
+        dev.addObserver(&obs);
+
+        for (int i = 0; i < 32; ++i)
+        {
+            hal.pushSpo2Entry(static_cast<uint32_t>(0x100 + i),
+                              static_cast<uint32_t>(0x200 + i));
+        }
+        hal.setReg(reg::INTR_STATUS_1,
+                   static_cast<uint8_t>(reg::INT_A_FULL | reg::INT_PPG_RDY));
+        hal.setReg(reg::FIFO_WR_PTR, 0);
+        hal.setReg(reg::FIFO_RD_PTR, 0);
+        hal.setReg(reg::OVF_COUNTER, 5);   // chip wrapped 5 times
+
+        EXPECT_EQ(32, dev.handleInterrupt());
+        EXPECT_EQ(5u,  dev.stats().chipOvfTotal);
+        EXPECT_EQ(32u, dev.stats().samplesDrained);
+
+        // A second drain — this time *without* overflow — proves
+        // both counters accumulate (chipOvfTotal stays put, drained
+        // adds 4). chipOvfTotal monotonicity gets exercised in the
+        // dedicated test below.
+        for (int i = 0; i < 4; ++i)
+        {
+            hal.pushSpo2Entry(static_cast<uint32_t>(0x300 + i),
+                              static_cast<uint32_t>(0x400 + i));
+        }
+        hal.setReg(reg::INTR_STATUS_1, reg::INT_PPG_RDY);
+        hal.setReg(reg::FIFO_WR_PTR, 4);
+        hal.setReg(reg::FIFO_RD_PTR, 0);
+        hal.setReg(reg::OVF_COUNTER, 0);
+
+        EXPECT_EQ(4, dev.handleInterrupt());
+        EXPECT_EQ(5u,  dev.stats().chipOvfTotal);     // unchanged (no new OVF)
+        EXPECT_EQ(36u, dev.stats().samplesDrained);   // 32 + 4
+    }
+
+    TEST(Max30102Test, HandleInterruptOvfTotalIsMonotonic)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        CapturingObserver obs;
+        dev.addObserver(&obs);
+
+        // Two consecutive overflow events. Whenever OVF_COUNTER > 0
+        // the driver treats the FIFO as full (32 entries), so we
+        // pre-stage 32 entries each round.
+        for (int round = 0; round < 2; ++round)
+        {
+            for (int i = 0; i < 32; ++i)
+            {
+                hal.pushSpo2Entry(static_cast<uint32_t>(round * 0x100 + i),
+                                  static_cast<uint32_t>(round * 0x200 + i));
+            }
+            hal.setReg(reg::INTR_STATUS_1,
+                       static_cast<uint8_t>(reg::INT_A_FULL | reg::INT_PPG_RDY));
+            hal.setReg(reg::FIFO_WR_PTR, 0);
+            hal.setReg(reg::FIFO_RD_PTR, 0);
+            hal.setReg(reg::OVF_COUNTER, static_cast<uint8_t>(3 + round));
+            EXPECT_EQ(32, dev.handleInterrupt());
+        }
+        EXPECT_EQ(7u, dev.stats().chipOvfTotal);   // 3 + 4
+    }
+
+    TEST(Max30102Test, HandleInterruptI2cFailureBumpsErrorCounter)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        const uint32_t before = dev.stats().i2cErrTotal;
+        hal.failNextRead();
+        EXPECT_EQ(-1, dev.handleInterrupt());
+        EXPECT_EQ(before + 1u, dev.stats().i2cErrTotal);
+    }
+
+    TEST(Max30102Test, StatsStartAtZero)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        const Max30102::Stats s = dev.stats();
+        EXPECT_EQ(0u, s.samplesDrained);
+        EXPECT_EQ(0u, s.chipOvfTotal);
+        EXPECT_EQ(0u, s.pwrRdyEvents);
+        EXPECT_EQ(0u, s.alcOvfEvents);
+        EXPECT_EQ(0u, s.i2cErrTotal);
+        EXPECT_EQ(0u, s.lastInt1);
+        EXPECT_EQ(0u, s.lastInt2);
     }
 
     TEST(Max30102Test, HandleInterruptHandlesOverflowGracefully)

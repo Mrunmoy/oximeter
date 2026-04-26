@@ -38,37 +38,38 @@ namespace
         }
     }
 
-    TEST(Spo2AlgoTest, RatioPoint4GivesSpo2Near100)
+    // Expected SpO2 values come from AN6845 Table 1 quadratic
+    // SpO2 = 1.5958422·R² − 34.6596622·R + 112.6898759:
+    //   R=0.4 → 99.08    R=0.8 → 85.98    R=1.4 → 67.29
+
+    TEST(Spo2AlgoTest, RatioPoint4GivesSpo2Near99)
     {
         Spo2Algo algo;
-        // R = 0.4 → 110 - 25·0.4 = 100. Saturates at 100 anyway.
-        feed(algo, /*r=*/0.4, /*dc=*/100000.0, /*acIr=*/2000.0,
+        feed(algo, /*r=*/0.4, /*dc=*/150000.0, /*acIr=*/2000.0,
              Spo2Algo::kWindow);
         ASSERT_TRUE(algo.valid());
-        EXPECT_GE(algo.spo2(), 99u);
+        EXPECT_GE(algo.spo2(), 98u);
         EXPECT_LE(algo.spo2(), 100u);
     }
 
-    TEST(Spo2AlgoTest, RatioPoint8GivesSpo2Near90)
+    TEST(Spo2AlgoTest, RatioPoint8GivesSpo2Near86)
     {
         Spo2Algo algo;
-        // R = 0.8 → 110 - 25·0.8 = 90.
-        feed(algo, /*r=*/0.8, /*dc=*/100000.0, /*acIr=*/2000.0,
+        feed(algo, /*r=*/0.8, /*dc=*/150000.0, /*acIr=*/2000.0,
              Spo2Algo::kWindow);
         ASSERT_TRUE(algo.valid());
-        EXPECT_GE(algo.spo2(), 89u);
-        EXPECT_LE(algo.spo2(), 91u);
+        EXPECT_GE(algo.spo2(), 85u);
+        EXPECT_LE(algo.spo2(), 87u);
     }
 
-    TEST(Spo2AlgoTest, RatioOnePoint4GivesSpo2Near75)
+    TEST(Spo2AlgoTest, RatioOnePoint4GivesSpo2Near67)
     {
         Spo2Algo algo;
-        // R = 1.4 → 110 - 25·1.4 = 75.
-        feed(algo, /*r=*/1.4, /*dc=*/100000.0, /*acIr=*/2000.0,
+        feed(algo, /*r=*/1.4, /*dc=*/150000.0, /*acIr=*/2000.0,
              Spo2Algo::kWindow);
         ASSERT_TRUE(algo.valid());
-        EXPECT_GE(algo.spo2(), 74u);
-        EXPECT_LE(algo.spo2(), 76u);
+        EXPECT_GE(algo.spo2(), 66u);
+        EXPECT_LE(algo.spo2(), 68u);
     }
 
     TEST(Spo2AlgoTest, FingerOffInvalid)

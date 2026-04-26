@@ -81,7 +81,8 @@ namespace oxinode::max3010x
         }
 
         const double r = (rmsRed / meanRed) / (rmsIr / meanIr);
-        double spo2 = 110.0 - 25.0 * r;
+        // AN6845 Table 1 calibrated quadratic (p.13).
+        double spo2 = kSpO2A * r * r + kSpO2B * r + kSpO2C;
         if (spo2 > 100.0) { spo2 = 100.0; }
         if (spo2 < 0.0)   { spo2 = 0.0;   }
 

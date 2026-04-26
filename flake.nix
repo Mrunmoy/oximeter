@@ -41,7 +41,8 @@
           dfu-util
           usbutils
 
-          # Python — desktop TUI client + asset/codegen scripts
+          # Python — desktop TUI client + asset/codegen scripts +
+          # the host/tools/plot_live.py JSON-Lines visualizer.
           (python3.withPackages (ps: with ps; [
             pyserial
             rich
@@ -49,6 +50,8 @@
             click
             pytest
             pyyaml
+            matplotlib
+            numpy
           ]))
 
           # Datasheet / curl
