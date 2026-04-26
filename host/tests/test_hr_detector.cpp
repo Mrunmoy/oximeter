@@ -152,32 +152,79 @@ namespace
         EXPECT_EQ(60u, HrDetector::medianOf3(0u, 60u, 60u));
     }
 
+    TEST(HrDetectorTest, MedianOf5IsOrderInvariant)
+    {
+        // 5-element median (insertion-sort impl) exercised with
+        // adversarial reorderings, plus a few that specifically
+        // exercise the 2-consecutive-bad-sample case that motivated
+        // the bump from 3 to 5.
+        EXPECT_EQ(60u, HrDetector::medianOf5(60u, 60u, 60u, 60u, 60u));
+        EXPECT_EQ(60u, HrDetector::medianOf5(60u, 60u, 60u, 60u, 100u));
+        EXPECT_EQ(60u, HrDetector::medianOf5(60u, 60u, 60u, 100u, 100u));
+        EXPECT_EQ(60u, HrDetector::medianOf5(100u, 100u, 60u, 60u, 60u));
+        EXPECT_EQ(60u, HrDetector::medianOf5(100u, 60u, 60u, 100u, 60u));
+        EXPECT_EQ(60u, HrDetector::medianOf5(0u, 60u, 60u, 60u, 100u));
+        EXPECT_EQ(0u,  HrDetector::medianOf5(0u, 0u, 0u, 60u, 60u));
+        // Median of three bad samples (≥ N/2 + 1) DOES flip — that's
+        // the per-design failure threshold of an N-deep median.
+        EXPECT_EQ(100u, HrDetector::medianOf5(60u, 60u, 100u, 100u, 100u));
+    }
+
     TEST(HrDetectorTest, MedianFilterAbsorbsBriefSignalDropout)
     {
         // The pattern observed on bench: stable 60 BPM for several
-        // seconds, then a single recompute window where the chip's
-        // input is briefly noisy and the algorithm reports 0 (no
-        // valid peaks), then back to 60. With the median-of-3 output
-        // filter, that single-cycle dropout should NOT show up as a
-        // 0 in `bpm()`; it should remain ≈60.
+        // seconds, then one or two recompute windows where the
+        // chip's input is briefly noisy and the algorithm reports
+        // 0 / a wrong value, then back to 60. With the median-of-5
+        // output filter, that 1-2 cycle dropout should NOT show up
+        // as a 0 in `bpm()`; it should remain ≈60.
         HrDetector d;
-        // 5 s of clean 60 BPM → buffer fills, several recomputes
-        // converge on 60. After this, history is [60, 60, 60].
-        feedSine(d, 60.0, 150000.0, 2000.0, /*sec=*/5.0);
+        // 8 s of clean 60 BPM → buffer fills, ≥5 recomputes converge
+        // on 60. After this, the median ring is `[60, 60, 60, 60, 60]`
+        // and `bpm()` is fully warmed up.
+        feedSine(d, 60.0, 150000.0, 2000.0, /*sec=*/8.0);
         ASSERT_GE(d.bpm(), 56u);
         ASSERT_LE(d.bpm(), 64u);
 
-        // Inject 1 s of *flat* (DC-only) signal. After 25 samples the
-        // buffer is mostly clean still (it's a 100-sample / 4 s
-        // window) and the next recompute fires at the kRecomputeEvery
-        // boundary. Even if that recompute reports 0 (the worst case
-        // for a brief dropout), the median of [60, 60, 0] is 60.
+        // Inject 1 s of flat (DC-only) signal. The next recompute
+        // sees a buffer with 3/4 clean + 1/4 flat; in the worst case
+        // it reports 0, which lands in a `[0,60,60,60,60]` ring
+        // whose median is still 60.
         for (int i = 0; i < HrDetector::kRecomputeEvery; ++i)
         {
             d.push(/*tMs=*/0u, /*ir=*/150000);
         }
         EXPECT_GE(d.bpm(), 56u) << "median should hold previous stable BPM";
         EXPECT_LE(d.bpm(), 64u);
+    }
+
+    TEST(HrDetectorTest, MedianOf5OutvotesTwoOutliers)
+    {
+        // Bench observation 2026-04-27 — *the reason this PR exists*:
+        // consecutive recomputes share 3 s of input data, so a noise
+        // burst can poison **two** adjacent recomputes. The failure
+        // mode median-of-3 could not absorb is `[good, bad, bad]` →
+        // median = bad. The new median-of-5 reduces 2 adjacent bad
+        // samples to a 2-of-5 minority, so the median holds.
+        //
+        // Driving the detector to emit exactly two adjacent bad BPMs
+        // from a synthetic signal is fragile (the analysis window
+        // overlaps and the find_peaks code path is hard to coax into
+        // a deterministic 2-cycle excursion). The mathematical
+        // property is what matters here, so this test pins it
+        // directly at the `medianOf5` level. The integration-level
+        // smoke test for steady-state stability is
+        // `MedianFilterAbsorbsBriefSignalDropout` above; the fadeout
+        // direction is `MedianFilterFadesOutAfterSustainedDropout`.
+        //
+        // Specific shapes the bench data showed (71 BPM stable, 100
+        // BPM excursion across two adjacent recomputes):
+        EXPECT_EQ(71u, HrDetector::medianOf5(71u, 71u, 71u, 100u, 100u))
+            << "outlier at end of window should not flip the median";
+        EXPECT_EQ(71u, HrDetector::medianOf5(100u, 100u, 71u, 71u, 71u))
+            << "outlier at start of window should not flip the median";
+        EXPECT_EQ(71u, HrDetector::medianOf5(71u, 100u, 71u, 100u, 71u))
+            << "outliers interleaved with stable values still lose";
     }
 
     TEST(HrDetectorTest, MedianFilterFadesOutAfterSustainedDropout)
@@ -194,7 +241,10 @@ namespace
         //      median ring of any residual valid history.
         // Total: kBufferSec + kBpmMedianN seconds of flat input.
         HrDetector d;
-        feedSine(d, 60.0, 150000.0, 2000.0, /*sec=*/5.0);
+        // 8 s feed (not 5 s) — at 25 Hz the median ring takes roughly
+        // ceil(kBpmMedianN/2)+1 recomputes (i.e. ~3-4 s post-buffer-
+        // fill) to flip from the 0-init majority to the live signal.
+        feedSine(d, 60.0, 150000.0, 2000.0, /*sec=*/8.0);
         ASSERT_GE(d.bpm(), 56u);
 
         const int samples =
