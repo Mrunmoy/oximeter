@@ -154,10 +154,10 @@ namespace
 
     TEST(HrDetectorTest, MedianOf5IsOrderInvariant)
     {
-        // Branchless 5-element median exercised with the same kind of
-        // adversarial reorderings used for medianOf3, plus a few that
-        // specifically exercise the 2-consecutive-bad-sample case
-        // that motivated the bump from 3 to 5.
+        // 5-element median (insertion-sort impl) exercised with
+        // adversarial reorderings, plus a few that specifically
+        // exercise the 2-consecutive-bad-sample case that motivated
+        // the bump from 3 to 5.
         EXPECT_EQ(60u, HrDetector::medianOf5(60u, 60u, 60u, 60u, 60u));
         EXPECT_EQ(60u, HrDetector::medianOf5(60u, 60u, 60u, 60u, 100u));
         EXPECT_EQ(60u, HrDetector::medianOf5(60u, 60u, 60u, 100u, 100u));
@@ -198,29 +198,33 @@ namespace
         EXPECT_LE(d.bpm(), 64u);
     }
 
-    TEST(HrDetectorTest, MedianFilterAbsorbsTwoConsecutiveBadRecomputes)
+    TEST(HrDetectorTest, MedianOf5OutvotesTwoOutliers)
     {
-        // Bench observation 2026-04-27: consecutive recomputes share
-        // 3 s of input data, so a noise burst can poison **two**
-        // adjacent recomputes — the failure mode median-of-3 could
-        // not absorb (median([good, bad, bad]) = bad). The new
-        // median-of-5 reduces the bad samples to a 2-of-5 minority,
-        // so the median holds.
+        // Bench observation 2026-04-27 — *the reason this PR exists*:
+        // consecutive recomputes share 3 s of input data, so a noise
+        // burst can poison **two** adjacent recomputes. The failure
+        // mode median-of-3 could not absorb is `[good, bad, bad]` →
+        // median = bad. The new median-of-5 reduces 2 adjacent bad
+        // samples to a 2-of-5 minority, so the median holds.
         //
-        // We don't have a clean way to force the algorithm to emit
-        // exactly two adjacent bad BPMs from a synthetic signal, so
-        // instead we feed enough clean data to fill the ring with
-        // 60 BPM, then independently verify the pure-function math:
-        // 3 good + 2 bad → median is good.
-        HrDetector d;
-        feedSine(d, 60.0, 150000.0, 2000.0, /*sec=*/8.0);
-        ASSERT_GE(d.bpm(), 56u);
-        ASSERT_LE(d.bpm(), 64u);
-
-        // Same shape verification at the medianOf5 level, on the same
-        // values the algorithm actually produces in practice.
-        EXPECT_EQ(60u, HrDetector::medianOf5(60u, 60u, 60u, 100u, 100u));
-        EXPECT_EQ(60u, HrDetector::medianOf5(100u, 100u, 60u, 60u, 60u));
+        // Driving the detector to emit exactly two adjacent bad BPMs
+        // from a synthetic signal is fragile (the analysis window
+        // overlaps and the find_peaks code path is hard to coax into
+        // a deterministic 2-cycle excursion). The mathematical
+        // property is what matters here, so this test pins it
+        // directly at the `medianOf5` level. The integration-level
+        // smoke test for steady-state stability is
+        // `MedianFilterAbsorbsBriefSignalDropout` above; the fadeout
+        // direction is `MedianFilterFadesOutAfterSustainedDropout`.
+        //
+        // Specific shapes the bench data showed (71 BPM stable, 100
+        // BPM excursion across two adjacent recomputes):
+        EXPECT_EQ(71u, HrDetector::medianOf5(71u, 71u, 71u, 100u, 100u))
+            << "outlier at end of window should not flip the median";
+        EXPECT_EQ(71u, HrDetector::medianOf5(100u, 100u, 71u, 71u, 71u))
+            << "outlier at start of window should not flip the median";
+        EXPECT_EQ(71u, HrDetector::medianOf5(71u, 100u, 71u, 100u, 71u))
+            << "outliers interleaved with stable values still lose";
     }
 
     TEST(HrDetectorTest, MedianFilterFadesOutAfterSustainedDropout)

@@ -27,10 +27,14 @@ namespace oxinode::max3010x
     uint8_t HrDetector::medianOf5(uint8_t a, uint8_t b, uint8_t c,
                                   uint8_t d, uint8_t e)
     {
-        // 5-sample insertion sort then pick index 2. The compiler
-        // unrolls this into a fixed dependency chain on Cortex-M0+
-        // (no branch-mispredict cost) and the whole call inlines
-        // away in the only place that matters (`pushOutput`).
+        // 5-sample insertion sort, return middle. Not branchless —
+        // the inner `while (s[j-1] > x)` is a data-dependent loop —
+        // but the trip count is bounded at 4 and the call inlines
+        // fully in `pushOutput`, which is the only place this runs.
+        // Total cost ≤ ~10 compares + ≤ ~10 swaps; trivial for the
+        // 1 Hz call rate. A purely-branchless 5-element sorting
+        // network exists (9 compares with cmovs) but it's not worth
+        // the readability hit at this rate.
         uint8_t s[5] = {a, b, c, d, e};
         for (int i = 1; i < 5; ++i)
         {
@@ -53,11 +57,12 @@ namespace oxinode::max3010x
         // kBpmMedianN is the static buffer width — currently 5.
         // The static_assert below is a maintenance aid: if a future
         // change tweaks kBpmMedianN, this fails the build and the
-        // author has to either update both sites or generalise
-        // pushOutput to call a length-N median.
+        // author has to either update both sites *or* add a
+        // fixed-width helper for the new size (e.g. medianOf7) and
+        // wire it in here.
         static_assert(kBpmMedianN == 5,
                       "pushOutput hard-codes a width-5 median; update if "
-                      "kBpmMedianN changes (or rewire to a generic medianOfN)");
+                      "kBpmMedianN changes (add a fixed-width helper)");
         m_bpm = medianOf5(m_bpmHistory[0], m_bpmHistory[1], m_bpmHistory[2],
                           m_bpmHistory[3], m_bpmHistory[4]);
     }

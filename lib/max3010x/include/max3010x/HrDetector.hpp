@@ -99,17 +99,18 @@ namespace oxinode::max3010x
         // either as "no display".
         [[nodiscard]] uint8_t bpm() const { return m_bpm; }
 
-        // Median of five uint8_t — pure function exposed publicly so
-        // unit tests can pin its behaviour without round-tripping
-        // through a synthetic signal. 0 is treated as a real value
-        // (representing "not yet valid"); the median therefore acts as
-        // a graceful fadeout when the finger is removed.
+        // Pure-function median helpers exposed publicly so unit tests
+        // can pin their behaviour without round-tripping through a
+        // synthetic signal. 0 is treated as a real value (representing
+        // "not yet valid"); the median therefore acts as a graceful
+        // fadeout when the finger is removed.
         //
-        // The narrower `medianOf3` helper is retained as a thin
-        // forwarder for any external caller that referenced it
-        // directly; new code should call `medianOfN` (any odd N ≤
-        // kBpmMedianN) or just trust `bpm()` which already runs the
-        // configured-width median.
+        // `medianOf5` is what `bpm()` actually uses (the configured
+        // window width is `kBpmMedianN == 5`). `medianOf3` is kept as
+        // a public helper for callers that explicitly want a 3-deep
+        // median — there is no generic `medianOfN` template; if a
+        // future window size is needed, add a fresh fixed-width helper
+        // alongside these two.
         [[nodiscard]] static uint8_t medianOf3(uint8_t a, uint8_t b, uint8_t c);
         [[nodiscard]] static uint8_t medianOf5(uint8_t a, uint8_t b, uint8_t c,
                                                uint8_t d, uint8_t e);
