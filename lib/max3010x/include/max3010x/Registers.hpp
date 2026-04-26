@@ -114,4 +114,63 @@ namespace oxinode::max3010x
         Spo2     = reg::MODE_SPO2,
         MultiLed = reg::MODE_MULTI_LED,
     };
+
+    // FIFO_CONFIG[3:0] — FIFO_A_FULL trigger threshold.
+    //
+    // Encoding (datasheet §FIFO Almost Full Threshold, p.14): the
+    // chip fires the FIFO_A_FULL interrupt when (32 - N) entries are
+    // unread, where N is the raw register value. N is 4 bits wide
+    // (0..15), so the reachable trigger range is **17..32 unread
+    // entries**. Asking for a smaller threshold (e.g. "fire at 15
+    // unread") is not expressible on the wire — the field has no
+    // encoding for it.
+    //
+    // The wire field's 4-bit width is the entire reason for this
+    // type. Storing the threshold as a bare `uint8_t` (the original
+    // `Config::fifoAlmostFullThreshold`) was a footgun: setting it
+    // to a raw value of 17 (0x11) silently masks down to 1, which
+    // programs the chip to trigger at 31 unread instead of the
+    // 17-unread default that the user actually wanted (matching the
+    // chip's POR behaviour). Strong typing makes that class of bug a
+    // compile error: you can't write `Config{}.fifoAFull = 17;`.
+    //
+    // Helper: `fifoAFullOnUnread<N>()` builds a value that triggers
+    // at exactly N unread, with a compile-time check that N is in
+    // [17, 32]. For one-off uses outside that range (there aren't
+    // any; the chip just doesn't support it), cast a u8 explicitly
+    // and own the consequences.
+    enum class FifoAFull : uint8_t
+    {
+        OnFull             = 0x00,  // 32 unread (FIFO completely full)
+        Unread31           = 0x01,
+        Unread30           = 0x02,
+        Unread29           = 0x03,
+        Unread28           = 0x04,
+        Unread27           = 0x05,
+        Unread26           = 0x06,
+        Unread25           = 0x07,
+        Unread24           = 0x08,
+        Unread23           = 0x09,
+        Unread22           = 0x0A,
+        Unread21           = 0x0B,
+        Unread20           = 0x0C,
+        Unread19           = 0x0D,
+        Unread18           = 0x0E,
+        Unread17           = 0x0F,  // chip default ("almost full")
+    };
+    static_assert(static_cast<uint8_t>(FifoAFull::Unread17) == 0x0F,
+                  "FIFO_A_FULL is a 4-bit field");
+    static_assert(static_cast<uint8_t>(FifoAFull::OnFull) == 0x00,
+                  "FIFO_A_FULL=0 means 32 unread (fully full)");
+
+    // Compile-time-checked convenience: build a `FifoAFull` from a
+    // desired unread-count threshold. Out-of-range counts (< 17 or
+    // > 32) are rejected at the point of use, not silently masked.
+    template <int kUnread>
+    [[nodiscard]] constexpr FifoAFull fifoAFullOnUnread()
+    {
+        static_assert(kUnread >= 17 && kUnread <= 32,
+                      "FIFO_A_FULL only reachable for unread in [17, 32]");
+        return static_cast<FifoAFull>(static_cast<uint8_t>(32 - kUnread));
+    }
 }
