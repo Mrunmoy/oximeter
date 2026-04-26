@@ -89,6 +89,14 @@ namespace oxinode::rp2040
 
             // Stage C — soft liveness summary
             std::uint32_t faultFlags;
+
+            // D-15 follow-up — chip config CRC.
+            // CRC-16/CCITT-FALSE over the seven static config registers
+            // the driver wrote at boot, refreshed by core1 every ~10 s.
+            // Host can detect "chip silently rebooted with the wrong
+            // config" by watching this for unexpected changes. A value
+            // of 0 means the readback hasn't run yet.
+            std::uint16_t cfgCrc;
         };
 
         void writeAlive(const AliveStats& s);

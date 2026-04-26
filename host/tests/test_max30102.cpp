@@ -1,4 +1,5 @@
 #include "fakes/FakeI2cHal.hpp"
+#include "max3010x/Framer.hpp"
 #include "max3010x/Max30102.hpp"
 #include "max3010x/Registers.hpp"
 
@@ -139,6 +140,81 @@ namespace
             EXPECT_EQ(samples[i].first,  obs.samples[i].red) << "i=" << i;
             EXPECT_EQ(samples[i].second, obs.samples[i].ir)  << "i=" << i;
         }
+    }
+
+    // ── readbackCfgCrc16 ────────────────────────────────────────
+
+    TEST(Max30102Test, ReadbackCfgCrcReturnsZeroBeforeCalled)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+        // No readbackCfgCrc16 call yet — Stats::cfgCrc should still be 0.
+        EXPECT_EQ(0u, dev.stats().cfgCrc);
+    }
+
+    TEST(Max30102Test, ReadbackCfgCrcMatchesExpectedRegisters)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        uint16_t crc = 0;
+        ASSERT_EQ(0, dev.readbackCfgCrc16(crc));
+
+        // Independently rebuild what the readback should have CRC'd:
+        // {INTR_ENABLE_1, INTR_ENABLE_2, FIFO_CONFIG, MODE_CONFIG,
+        //  SPO2_CONFIG, LED1_PA, LED2_PA} — values that
+        // ConfigureWritesExpectedRegisters already pins down.
+        const uint8_t expected[7] = {
+            hal.reg(reg::INTR_ENABLE_1),
+            hal.reg(reg::INTR_ENABLE_2),
+            hal.reg(reg::FIFO_CONFIG),
+            hal.reg(reg::MODE_CONFIG),
+            hal.reg(reg::SPO2_CONFIG),
+            hal.reg(reg::LED1_PA),
+            hal.reg(reg::LED2_PA),
+        };
+        const uint16_t expectedCrc =
+            oxinode::max3010x::proto::crc16(expected, sizeof(expected));
+
+        EXPECT_EQ(expectedCrc, crc);
+        EXPECT_EQ(expectedCrc, dev.stats().cfgCrc);
+    }
+
+    TEST(Max30102Test, ReadbackCfgCrcChangesWhenChipRegistersChange)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        uint16_t crc1 = 0;
+        ASSERT_EQ(0, dev.readbackCfgCrc16(crc1));
+
+        // Simulate the chip silently mangling its own config (e.g.
+        // stuck-bit, half-brownout that didn't trip PWR_RDY): poke
+        // an arbitrary bit in MODE_CONFIG behind the driver's back.
+        hal.setReg(reg::MODE_CONFIG, hal.reg(reg::MODE_CONFIG) ^ 0x10);
+
+        uint16_t crc2 = 0;
+        ASSERT_EQ(0, dev.readbackCfgCrc16(crc2));
+        EXPECT_NE(crc1, crc2);
+    }
+
+    TEST(Max30102Test, ReadbackCfgCrcPropagatesI2cFailure)
+    {
+        FakeI2cHal hal;
+        Max30102 dev(hal);
+        ASSERT_EQ(0, dev.configure(Max30102::Config{}));
+
+        const Max30102::Stats before = dev.stats();
+        hal.failNextRead();
+        uint16_t crc = 0;
+        EXPECT_NE(0, dev.readbackCfgCrc16(crc));
+        // i2cErrTotal must have ticked.
+        EXPECT_GT(dev.stats().i2cErrTotal, before.i2cErrTotal);
+        // cfgCrc is left at whatever it was before — never half-written.
+        EXPECT_EQ(before.cfgCrc, dev.stats().cfgCrc);
     }
 
     TEST(Max30102Test, HandleInterruptNoFlagsSetIsNoOp)
