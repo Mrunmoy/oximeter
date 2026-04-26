@@ -93,10 +93,16 @@ namespace oxinode::max3010x
 
         // ── FIFO_CONFIG: averaging | rollover | almost-full threshold
         // [7:5] SMP_AVE, [4] FIFO_ROLLOVER_EN, [3:0] FIFO_A_FULL.
+        // FifoAFull's named enumerators are all in [0x00, 0x0F], but a
+        // caller could deliberately `static_cast<FifoAFull>` an
+        // out-of-range u8 (e.g. via deserialised config) and bypass
+        // the strong typing. Mask explicitly to 4 bits so the wire
+        // field stays clean regardless — same defensive-mask pattern
+        // the SMP_AVE / SPO2_SR / ADC_RGE casts above use.
         const uint8_t fifoCfg =
             static_cast<uint8_t>((static_cast<uint8_t>(cfg.avg) & 0x07) << 5) |
             static_cast<uint8_t>(cfg.fifoRollover ? (1 << 4) : 0) |
-            static_cast<uint8_t>(cfg.fifoAlmostFullThreshold & 0x0F);
+            static_cast<uint8_t>(static_cast<uint8_t>(cfg.fifoAFull) & 0x0F);
         rc = writeReg(m_hal, cfg.devAddr, reg::FIFO_CONFIG, fifoCfg);
         if (rc != 0) { return rc; }
 
